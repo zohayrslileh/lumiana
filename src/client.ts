@@ -1,6 +1,7 @@
 import { Buffer } from 'buffer';
 import { References } from './references.js';
 import { evaluateExpression } from './references.js';
+import { dispatchKernel, installKernel, removeKernel } from './runtime/bridge.js';
 import {
   PREFIX,
   encodePacket,
@@ -149,6 +150,7 @@ function send(c: Connection, packet: any): void {
 }
 function close(c: Connection, error = new Error('Lumiana is disconnected')): void {
   if (state.connection === c) state.connection = undefined;
+  removeKernel(c);
   c.refs.close();
   for (const promise of c.pending.values()) promise.reject(error);
   c.pending.clear();
@@ -273,11 +275,18 @@ export const connect = {
             const packet = decodePacket(new Uint8Array(event.data));
             if (packet.type === 'ready') {
               state.connection = c;
+              installKernel(c, (operation, ...args) =>
+                c.refs.invokeAsync('kernel', operation, ...args),
+              );
               resolve();
               return;
             }
             if (packet.type === 'console' || packet.type === 'fatal') {
               project(c, packet);
+              return;
+            }
+            if (packet.type === 'kernel-event') {
+              dispatchKernel(packet.handle, packet.event, packet.args);
               return;
             }
             if (packet.type === 'callback') {

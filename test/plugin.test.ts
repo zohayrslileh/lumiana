@@ -43,6 +43,26 @@ test('Vite builds browser packages and deploys only proven or explicit native de
         "const {EventEmitter}=require('node:events');const {inherits}=require('node:util');function Boot(){this.setMaxListeners(0)}inherits(Boot,EventEmitter);module.exports=()=>new Boot() instanceof EventEmitter?'inheritance-proof':'broken';",
     });
     await pkg(
+      'filesystem-library',
+      {
+        'index.js':
+          "import {readFile} from 'node:fs/promises';export const filesystemProof='filesystem-runtime-proof';export const loadText=file=>readFile(file,'utf8');",
+      },
+      { type: 'module' },
+    );
+    await pkg('node-environment-library', {
+      'index.js':
+        "const assert=require('node:assert');const path=require('node:path');const process=require('node:process');const querystring=require('node:querystring');const {PassThrough}=require('node:stream');module.exports=()=>{assert.equal(path.join('a','b'),'a/b');assert.equal(querystring.stringify({a:1}),'a=1');const stream=new PassThrough();return process.browser&&stream instanceof PassThrough?'node-environment-proof':'broken'};",
+    });
+    await pkg(
+      'socket-library',
+      {
+        'index.js':
+          "import {createServer,Socket} from 'node:net';export const socketProof=typeof createServer==='function'&&typeof Socket==='function'?'socket-runtime-proof':'broken';",
+      },
+      { type: 'module' },
+    );
+    await pkg(
       'conditional',
       {
         'browser.js': "export default 'browser-condition-proof';",
@@ -77,7 +97,7 @@ test('Vite builds browser packages and deploys only proven or explicit native de
     );
     await fs.writeFile(
       path.join(root, 'entry.js'),
-      "import {value,tmpdir} from 'portable';import cjs from 'browser-cjs';import inheritance from 'portable-inheritance';import condition from 'conditional';import {WebSocketServer} from 'conditional-server';import addon from 'native-addon';import explicit from 'explicit';export * from 'node:os';const server=new WebSocketServer();document.body.textContent=[value,tmpdir(),cjs(),inheritance(),condition,server.kind,addon,explicit].join(',');",
+      "import {value,tmpdir} from 'portable';import cjs from 'browser-cjs';import inheritance from 'portable-inheritance';import environment from 'node-environment-library';import {filesystemProof} from 'filesystem-library';import {socketProof} from 'socket-library';import condition from 'conditional';import {WebSocketServer} from 'conditional-server';import addon from 'native-addon';import explicit from 'explicit';export * from 'node:os';const server=new WebSocketServer();document.body.textContent=[value,tmpdir(),cjs(),inheritance(),environment(),filesystemProof,socketProof,condition,server.kind,addon,explicit].join(',');",
     );
     await build({
       root,
@@ -101,6 +121,9 @@ test('Vite builds browser packages and deploys only proven or explicit native de
       'bundled-proof',
       'cjs-proof',
       'inheritance-proof',
+      'node-environment-proof',
+      'filesystem-runtime-proof',
+      'socket-runtime-proof',
       'browser-condition-proof',
     ])
       assert.ok(output.includes(text), text);
@@ -117,6 +140,8 @@ test('Vite builds browser packages and deploys only proven or explicit native de
     assert.equal(manifest.dependencies.explicit, '1.0.0');
     assert.equal(manifest.dependencies['conditional-server'], '1.0.0');
     assert.equal(manifest.dependencies.portable, undefined);
+    assert.equal(manifest.dependencies['filesystem-library'], undefined);
+    assert.equal(manifest.dependencies['socket-library'], undefined);
     assert.equal(manifest.dependencies.conditional, undefined);
     assert.ok((await fs.stat(path.join(root, 'dist/server/worker.js'))).size > 0);
     const main = await fs.readFile(path.join(root, 'dist/main.mjs'), 'utf8');

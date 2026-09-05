@@ -22,6 +22,26 @@ const portableBuiltins = new Set([
   'node:events',
   'util',
   'node:util',
+  'fs/promises',
+  'node:fs/promises',
+  'assert',
+  'node:assert',
+  'path',
+  'node:path',
+  'process',
+  'node:process',
+  'querystring',
+  'node:querystring',
+  'stream',
+  'node:stream',
+  'string_decoder',
+  'node:string_decoder',
+  'url',
+  'node:url',
+  'net',
+  'node:net',
+  'http',
+  'node:http',
 ]);
 const nativeGlobals = new Set(['process', 'global', 'setImmediate', 'clearImmediate']);
 
@@ -216,13 +236,6 @@ export class Bundling {
                     )
                       reason = 'Native module resolver access';
                     if (
-                      n.callee.type === 'Identifier' &&
-                      n.callee.name === 'require' &&
-                      !p.scope.getBinding('require') &&
-                      n.arguments[0]?.type !== 'StringLiteral'
-                    )
-                      reason = `Dynamic require in ${path.relative(file, args.path) || path.basename(file)}`;
-                    if (
                       n.callee.type === 'MemberExpression' &&
                       n.callee.object.name === 'process' &&
                       !p.scope.getBinding('process') &&
@@ -411,6 +424,7 @@ export async function transformSource(source: string, id: string, options: Trans
   const edits = new MagicString(source),
     imports: string[] = [];
   const moduleNodes: any[] = [],
+    dynamicRequires: any[] = [],
     globals: any[] = [],
     members: any[] = [],
     calls: any[] = [],
@@ -463,12 +477,10 @@ export async function transformSource(source: string, id: string, options: Trans
       calls.push(p);
       if (p.node.callee.type !== 'Identifier') return;
       const binding = p.scope.getBinding(p.node.callee.name);
-      if (
-        p.node.callee.name === 'require' &&
-        !binding &&
-        p.node.arguments[0]?.type === 'StringLiteral'
-      )
-        moduleNodes.push(p);
+      if (p.node.callee.name === 'require' && !binding) {
+        if (p.node.arguments[0]?.type === 'StringLiteral') moduleNodes.push(p);
+        else dynamicRequires.push(p);
+      }
       if (
         binding?.path.node.type === 'ImportSpecifier' &&
         ['node', 'importNode'].includes(binding.path.node.imported.name) &&
@@ -642,6 +654,27 @@ export async function transformSource(source: string, id: string, options: Trans
       continue;
     }
     edits.overwrite(n.start, n.end, replacement);
+    removed.push([n.start, n.end]);
+  }
+
+  // Runtime-selected modules are a capability of one expression, not a reason
+  // to move the package containing that expression out of the browser.
+  for (const p of dynamicRequires) {
+    const n = p.node,
+      argument = n.arguments[0];
+    if (
+      !argument ||
+      argument.type === 'SpreadElement' ||
+      removed.some(([start, end]) => n.start >= start && n.end <= end)
+    )
+      continue;
+    used.add('nativeModule');
+    options.nativeUsage?.();
+    edits.overwrite(
+      n.start,
+      n.end,
+      `${nodeName}(${edits.slice(argument.start, argument.end)},null,${JSON.stringify(options.origin ?? null)})`,
+    );
     removed.push([n.start, n.end]);
   }
 

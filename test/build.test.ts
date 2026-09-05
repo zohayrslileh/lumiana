@@ -132,7 +132,7 @@ test('bundling is the default; Node built-ins are not grounds for excluding a pa
     assert.equal(goodPlacement.native, false);
     assert.deepEqual(goodPlacement.nativeExports, ['read']);
     assert.equal((await placement.placement('native', native)).native, true);
-    assert.match((await placement.placement('dynamic', dynamic)).reason!, /Dynamic require/);
+    assert.equal((await placement.placement('dynamic', dynamic)).native, false);
     assert.equal((await placement.placement('data', data)).native, false);
     assert.equal((await placement.placement('explicit', good)).native, true);
 
@@ -164,6 +164,20 @@ test('bundling is the default; Node built-ins are not grounds for excluding a pa
       { place: async () => ({ native: true }) },
     );
     assert.doesNotMatch(ordered!.code, /__lumiana\d+\(app,"get"/);
+
+    let dynamicUsage = false;
+    const dynamicModule = await transformSource(
+      'module.exports=name=>require(name);',
+      'dynamic.cjs',
+      {
+        place: async () => ({ native: false }),
+        nativeUsage: () => (dynamicUsage = true),
+        origin: 'dynamic.cjs',
+      },
+    );
+    assert.equal(dynamicUsage, true);
+    assert.match(dynamicModule!.code, /nativeModule as/);
+    assert.match(dynamicModule!.code, /\(name,null,"dynamic\.cjs"\)/);
   } finally {
     await fs.rm(temp, { recursive: true, force: true });
   }

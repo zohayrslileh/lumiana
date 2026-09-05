@@ -2,9 +2,95 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { fork, execFileSync } from 'node:child_process';
 import { once } from 'node:events';
+import { createRequire } from 'node:module';
 import { createServer } from 'node:net';
+import fs from 'node:fs/promises';
+import os from 'node:os';
+import path from 'node:path';
+import { pathToFileURL } from 'node:url';
 import { decode } from '@msgpack/msgpack';
+import { build as bundle } from 'esbuild';
 import { transformSource } from '../src/build.js';
+
+const require = createRequire(import.meta.url);
+
+async function browserExpressBundle(directory: string): Promise<string> {
+  const output = path.join(directory, 'express.mjs');
+  const shims = {
+    fs: path.join(directory, 'fs.mjs'),
+    crypto: path.join(directory, 'crypto.mjs'),
+    empty: path.join(directory, 'empty.mjs'),
+  };
+  await Promise.all([
+    fs.writeFile(
+      shims.fs,
+      'export class Stats{};export function createReadStream(){throw new Error("not used")};export default {Stats,createReadStream};',
+    ),
+    fs.writeFile(
+      shims.crypto,
+      'export function createHash(){throw new Error("not used")};export default {createHash};',
+    ),
+    fs.writeFile(shims.empty, 'export default {};'),
+  ]);
+  const runtime = (name: string) => path.resolve(`dist/runtime/${name}.js`);
+  const local = (name: string) => require.resolve(name);
+  const replacements: Record<string, string> = {
+    http: runtime('http'),
+    'node:http': runtime('http'),
+    net: runtime('net'),
+    'node:net': runtime('net'),
+    assert: local('assert/'),
+    'node:assert': local('assert/'),
+    buffer: local('buffer/'),
+    'node:buffer': local('buffer/'),
+    events: local('events/'),
+    'node:events': local('events/'),
+    path: local('path-browserify'),
+    'node:path': local('path-browserify'),
+    process: local('process/browser'),
+    'node:process': local('process/browser'),
+    querystring: local('querystring-es3'),
+    'node:querystring': local('querystring-es3'),
+    stream: local('stream-browserify'),
+    'node:stream': local('stream-browserify'),
+    string_decoder: local('string_decoder/'),
+    'node:string_decoder': local('string_decoder/'),
+    url: local('url/'),
+    'node:url': local('url/'),
+    fs: shims.fs,
+    'node:fs': shims.fs,
+    crypto: shims.crypto,
+    'node:crypto': shims.crypto,
+    async_hooks: shims.empty,
+    'node:async_hooks': shims.empty,
+    zlib: shims.empty,
+    'node:zlib': shims.empty,
+  };
+  await bundle({
+    stdin: {
+      contents: "import express from 'express';export default express;",
+      resolveDir: path.resolve('example'),
+      sourcefile: 'express-runtime-entry.js',
+    },
+    outfile: output,
+    bundle: true,
+    platform: 'browser',
+    format: 'esm',
+    logLevel: 'silent',
+    plugins: [
+      {
+        name: 'lumiana-runtime-contracts',
+        setup(build) {
+          build.onResolve({ filter: /.*/ }, (args) => {
+            const replacement = replacements[args.path];
+            return replacement ? { path: replacement } : undefined;
+          });
+        },
+      },
+    ],
+  });
+  return output;
+}
 class XMLHttpRequest {
   static requests = 0;
   static operations: string[] = [];
@@ -67,6 +153,9 @@ test('client contract through real HTTP, binary WebSocket and an isolated native
     nativeBindings,
     invokeMember,
   } = await import('../dist/client.js');
+  const browserFs = await import('../dist/runtime/fs-promises.js');
+  const browserHttp = await import('../dist/runtime/http.js');
+  const browserNet = await import('../dist/runtime/net.js');
   const creds = { username: 'test', password: 'secret', url };
   const compile = async (source: string, origin = 'reader.js') => {
     const result = await transformSource(source, origin, {
@@ -84,6 +173,7 @@ test('client contract through real HTTP, binary WebSocket and an isolated native
     assert.equal(reader.read({ child: { value: 7 } }), 7);
     assert.throws(() => lumiana.status, /not connected/);
     assert.throws(() => node('node:fs'), /not connected/);
+    await assert.rejects(browserFs.readFile('/not-connected'), /not connected/);
     await assert.rejects(
       connect.credentials({ ...creds, password: 'wrong' }),
       /Invalid credentials/,
@@ -94,6 +184,98 @@ test('client contract through real HTTP, binary WebSocket and an isolated native
     assert.equal(await connect.credentials(creds), lumiana);
     await assert.rejects(connect.credentials({ ...creds, password: 'different' }), /different/);
     assert.equal((await lumiana.status()).pid, pid);
+    const kernelDirectory = await fs.mkdtemp(path.join(os.tmpdir(), 'lumiana-browser-fs-'));
+    const kernelFile = path.join(kernelDirectory, 'message.bin');
+    try {
+      const beforeKernel = XMLHttpRequest.requests;
+      await browserFs.writeFile(kernelFile, new Uint8Array([0, 128, 255]));
+      const kernelBytes = await browserFs.readFile(kernelFile);
+      assert.equal(Buffer.isBuffer(kernelBytes), true);
+      assert.deepEqual(kernelBytes, Buffer.from([0, 128, 255]));
+      const kernelStat = await browserFs.stat(kernelFile);
+      assert.equal(kernelStat.isFile(), true);
+      assert.equal(Object.getPrototypeOf(kernelStat).constructor.name, 'Stats');
+      assert.equal(
+        XMLHttpRequest.requests,
+        beforeKernel,
+        'filesystem kernel operations use the established WebSocket',
+      );
+    } finally {
+      await browserFs.rm(kernelDirectory, { recursive: true, force: true });
+    }
+    const beforeNetworkKernel = XMLHttpRequest.requests;
+    const kernelServer = browserNet.createServer((socket: any) =>
+      socket.on('data', (data: Buffer) => socket.write(data)),
+    );
+    kernelServer.listen(0, '127.0.0.1');
+    await once(kernelServer, 'listening');
+    const kernelSocket = browserNet.createConnection(kernelServer.address().port, '127.0.0.1');
+    await once(kernelSocket, 'connect');
+    kernelSocket.write(Buffer.from([1, 2, 3]));
+    const [kernelEcho] = await once(kernelSocket, 'data');
+    assert.deepEqual(kernelEcho, Buffer.from([1, 2, 3]));
+    kernelSocket.end();
+    await once(kernelSocket, 'close');
+    kernelServer.close();
+    await once(kernelServer, 'close');
+    assert.equal(
+      XMLHttpRequest.requests,
+      beforeNetworkKernel,
+      'socket kernel operations and events share the established WebSocket',
+    );
+    const beforeHttpKernel = XMLHttpRequest.requests;
+    let requestClass = '';
+    let responseClass = '';
+    const kernelHttp = browserHttp.createServer((request: any, response: any) => {
+      requestClass = request.constructor.name;
+      responseClass = response.constructor.name;
+      response.setHeader('x-runtime', 'local');
+      response.end('Hello from the browser runtime');
+    });
+    kernelHttp.listen(0, '127.0.0.1');
+    await once(kernelHttp, 'listening');
+    const kernelHttpResponse = await originalFetch(
+      `http://127.0.0.1:${kernelHttp.address().port}/`,
+    );
+    assert.equal(await kernelHttpResponse.text(), 'Hello from the browser runtime');
+    assert.equal(kernelHttpResponse.headers.get('x-runtime'), 'local');
+    assert.equal(requestClass, 'IncomingMessage');
+    assert.equal(responseClass, 'ServerResponse');
+    kernelHttp.close();
+    await once(kernelHttp, 'close');
+    assert.equal(
+      XMLHttpRequest.requests,
+      beforeHttpKernel,
+      'HTTP kernel operations and request events share the established WebSocket',
+    );
+    const expressDirectory = await fs.mkdtemp(path.join(os.tmpdir(), 'lumiana-express-runtime-'));
+    try {
+      const express = (
+        await import(pathToFileURL(await browserExpressBundle(expressDirectory)).href)
+      ).default;
+      const application = express();
+      application.disable('etag');
+      application.get('/hello/:name', (request: any, response: any) => {
+        response.status(201).json({ hello: request.params.name, runtime: 'browser' });
+      });
+      const beforeExpressKernel = XMLHttpRequest.requests;
+      const expressServer = application.listen(0, '127.0.0.1');
+      await once(expressServer, 'listening');
+      const expressResponse = await originalFetch(
+        `http://127.0.0.1:${expressServer.address().port}/hello/Lumiana`,
+      );
+      assert.equal(expressResponse.status, 201);
+      assert.deepEqual(await expressResponse.json(), { hello: 'Lumiana', runtime: 'browser' });
+      expressServer.close();
+      await once(expressServer, 'close');
+      assert.equal(
+        XMLHttpRequest.requests,
+        beforeExpressKernel,
+        'a bundled Express application executes locally over the HTTP kernel',
+      );
+    } finally {
+      await fs.rm(expressDirectory, { recursive: true, force: true });
+    }
     node('node:process').env.LUMIANA_STRINGIFY_TEST = 'stringify-ok';
     const beforeStringify = XMLHttpRequest.requests;
     const serialized = await compile(

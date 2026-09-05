@@ -23,12 +23,27 @@ export interface LumianaPluginOptions {
   nodeModules?: (string | RegExp)[];
 }
 const runtimeDir = path.dirname(fileURLToPath(import.meta.url));
+const runtimeRequire = createRequire(import.meta.url);
 const clientId = '\0lumiana:client';
 const localBuiltins: Record<string, string> = Object.assign(Object.create(null), {
   events: 'events/',
   buffer: 'buffer/',
   util: 'util/',
+  assert: 'assert/',
+  path: 'path-browserify',
+  process: 'process/browser',
+  querystring: 'querystring-es3',
+  stream: 'stream-browserify',
+  string_decoder: 'string_decoder/',
+  url: 'url/',
 });
+const runtimeBuiltins: Record<string, string> = Object.assign(Object.create(null), {
+  'fs/promises': 'runtime/fs-promises.js',
+  http: 'runtime/http.js',
+  net: 'runtime/net.js',
+});
+const builtinName = (id: string) => id.replace(/^node:/, '');
+const exact = (id: string) => new RegExp(`^${id.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}$`);
 export function lumiana(options: LumianaPluginOptions = {}): Plugin {
   let resolveBrowser: ReturnType<ResolvedConfig['createResolver']>;
   let config: ResolvedConfig,
@@ -56,7 +71,8 @@ export function lumiana(options: LumianaPluginOptions = {}): Plugin {
     id.startsWith('\0') ||
     id.includes('/vite/dist/') ||
     id.includes('/@vite/');
-  const native = (id: string) => isBuiltin(id) && !localBuiltins[id.replace(/^node:/, '')];
+  const native = (id: string) =>
+    isBuiltin(id) && !localBuiltins[builtinName(id)] && !runtimeBuiltins[builtinName(id)];
   return {
     name: 'lumiana',
     enforce: 'pre',
@@ -65,6 +81,13 @@ export function lumiana(options: LumianaPluginOptions = {}): Plugin {
       bundling = new Bundling(root, options.nodeModules);
       deploymentDir = path.resolve(root, user.build?.outDir ?? 'dist');
       const require = createRequire(path.join(root, 'package.json'));
+      const localAliases = Object.entries(localBuiltins).flatMap(([id, target]) => {
+        const replacement = runtimeRequire.resolve(target);
+        return [
+          { find: exact(id), replacement },
+          { find: exact(`node:${id}`), replacement },
+        ];
+      });
       const version = Number(require('vite/package.json').version.split('.')[0]);
       placeModule = async (
         id: string,
@@ -72,7 +95,8 @@ export function lumiana(options: LumianaPluginOptions = {}): Plugin {
         resolve?: (id: string) => Promise<string | undefined>,
         requiredExports: string[] = [],
       ) => {
-        if (localBuiltins[id.replace(/^node:/, '')]) return { native: false };
+        if (localBuiltins[builtinName(id)] || runtimeBuiltins[builtinName(id)])
+          return { native: false };
         let resolved: string | undefined;
         try {
           resolved = resolve
@@ -107,8 +131,10 @@ export function lumiana(options: LumianaPluginOptions = {}): Plugin {
                     name: 'lumiana-dependencies',
                     async resolveId(this: any, id: string, importer?: string) {
                       if (id === 'lumiana/internal') return path.join(runtimeDir, 'access.js');
-                      const local = localBuiltins[id.replace(/^node:/, '')];
-                      if (local) return require.resolve(local);
+                      const runtime = runtimeBuiltins[builtinName(id)];
+                      if (runtime) return path.join(runtimeDir, runtime);
+                      const local = localBuiltins[builtinName(id)];
+                      if (local) return runtimeRequire.resolve(local);
                       if (id === 'lumiana/client') return { id, external: true };
                       if (
                         (
@@ -150,8 +176,10 @@ export function lumiana(options: LumianaPluginOptions = {}): Plugin {
                         if (args.pluginData?.lumianaProbe) return;
                         if (args.path === 'lumiana/internal')
                           return { path: path.join(runtimeDir, 'access.js') };
-                        const local = localBuiltins[args.path.replace(/^node:/, '')];
-                        if (local) return { path: require.resolve(local) };
+                        const runtime = runtimeBuiltins[builtinName(args.path)];
+                        if (runtime) return { path: path.join(runtimeDir, runtime) };
+                        const local = localBuiltins[builtinName(args.path)];
+                        if (local) return { path: runtimeRequire.resolve(local) };
                         if (args.path === 'lumiana/client')
                           return { path: args.path, external: true };
                         if (
@@ -212,9 +240,10 @@ export function lumiana(options: LumianaPluginOptions = {}): Plugin {
               },
             };
       return {
+        resolve: { alias: localAliases },
         optimizeDeps: {
           exclude: ['lumiana/client'],
-          include: Object.values(localBuiltins),
+          include: Object.keys(localBuiltins).flatMap((id) => [id, `node:${id}`]),
           ...optimizer,
         },
         build: {
@@ -228,7 +257,7 @@ export function lumiana(options: LumianaPluginOptions = {}): Plugin {
       config = resolved;
       // Linked installs may put browser runtime entries outside the Vite root.
       // Extend resolved rules so workspace detection and explicit user paths survive.
-      for (const name of ['client.js', 'access.js']) {
+      for (const name of ['client.js', 'access.js', ...Object.values(runtimeBuiltins)]) {
         const file = normalizePath(path.join(runtimeDir, name));
         if (!config.server.fs.allow.includes(file)) config.server.fs.allow.push(file);
       }
@@ -237,8 +266,10 @@ export function lumiana(options: LumianaPluginOptions = {}): Plugin {
     async resolveId(id, importer, resolveOptions) {
       if (id === 'lumiana/client') return clientId;
       if (id === 'lumiana/internal') return path.join(runtimeDir, 'access.js');
-      const local = localBuiltins[id.replace(/^node:/, '')];
-      if (local) return this.resolve(local, importer, { ...resolveOptions, skipSelf: true });
+      const runtime = runtimeBuiltins[builtinName(id)];
+      if (runtime) return path.join(runtimeDir, runtime);
+      const local = localBuiltins[builtinName(id)];
+      if (local) return runtimeRequire.resolve(local);
       if (id === clientId) return id;
       if (native(id) && !resolveOptions?.ssr) {
         // Imports are rewritten before analysis. This catches dependency scanner

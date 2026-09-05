@@ -142,3 +142,36 @@ export conditions through its dependencies. It preserved the correct Node
 startup because low-level server classes then reflected across the boundary.
 That experiment was reverted. Moving the adapter graph alone is not a valid
 optimization; Elysia and its native adapter would need a shared execution region.
+
+## Remote kernel branch
+
+- Work continues on `runtime/remote-kernel` from commit `9354a71`. Current changes
+  are intentionally uncommitted while the runtime contracts are expanded.
+- Browser-owned implementations now exist for `node:fs/promises`, `node:net`, and
+  the HTTP server half of `node:http`. Their JavaScript objects, prototypes,
+  streams, event emitters, callbacks, and buffers stay in the browser. Per-session
+  Worker kernels own only filesystem handles, OS sockets, and HTTP listeners.
+  Kernel commands and events use the established binary MessagePack WebSocket;
+  disconnect closes all handles on both sides.
+- Pure built-ins currently mapped locally are assert, buffer, events, path,
+  process, querystring, stream, string_decoder, url, and util. Runtime-owned
+  polyfills resolve from Lumiana's installation even when Lumiana is linked into
+  a project outside its repository.
+- A runtime-selected `require(expression)` is now transformed at the expression.
+  It no longer causes the package containing it to be excluded from the browser
+  bundle. This keeps Express local while preserving native module resolution for
+  optional view engines if that branch executes.
+- A real Express 5 application has been verified in Vite 8 and in the automated
+  host/Worker integration test. Its router and response logic execute locally,
+  its OS HTTP listener executes in the Worker, binary transport uses the existing
+  WebSocket, and startup/request handling performs zero synchronous XHR calls.
+- Runtime unit tests cover local filesystem values and handles, Dirent behavior,
+  TCP binary echo, and HTTP message/response classes. The canonical test command
+  passes 16 tests, including dev, preview, placement, isolation, MessagePack,
+  Express, and lifecycle coverage. Type checking and production builds pass.
+- Remaining runtime domains include callback and synchronous `node:fs`, file
+  streams and watchers; HTTP client APIs, upgrades and backpressure; TLS, DNS,
+  UDP, child processes and workers; crypto/zlib/async context; native-addon
+  adapters; and broader Fastify/Elysia/socket/filesystem/native-package
+  compatibility tests. The compiler also still needs the general asynchronous
+  transaction model for synchronous-looking source operations.

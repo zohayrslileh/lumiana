@@ -5,12 +5,22 @@ import { pathToFileURL, fileURLToPath } from 'node:url';
 import { resolve as resolveImport } from 'import-meta-resolve';
 import { evaluateExpression, References } from './references.js';
 import { failure, restoreException, type Invocation, type Graph } from './protocol.js';
+import { FileKernel } from './kernel/files.js';
+import { NetworkKernel } from './kernel/network.js';
+import { HttpKernel } from './kernel/http.js';
 if (!parentPort) throw new Error('Lumiana requires a worker thread');
 const port = parentPort;
 const signal = new Int32Array(workerData.signal);
 const parentURL = pathToFileURL(path.join(workerData.root, 'package.json')).href;
 const require = createRequire(parentURL);
 const modules = new Map<string, any>();
+const files = new FileKernel();
+let kernelSequence = 0;
+const allocateKernelHandle = () => ++kernelSequence;
+const kernelEvent = (handle: number, event: string, ...args: any[]) =>
+    send({ type: 'kernel-event', handle, event, args }),
+  network = new NetworkKernel(kernelEvent, allocateKernelHandle),
+  http = new HttpKernel(kernelEvent, allocateKernelHandle);
 let sequence = 0,
   pumping = 0;
 let context: number | undefined;
@@ -86,7 +96,8 @@ const exception = (error: unknown) =>
 function handle(message: any): void {
   if (message.type === 'close') {
     refs.close();
-    process.exit(0);
+    void Promise.all([files.close(), network.close(), http.close()]).finally(() => process.exit(0));
+    return;
   }
   if (message.type === 'turn-end') {
     if (holdingTurn === message.turn) holdingTurn = undefined;
@@ -122,6 +133,19 @@ function handle(message: any): void {
       pump(() => holdingTurn !== message.turn);
     }
   };
+  if (message.invocation.operation === 'kernel') {
+    const [operation, ...args] = message.invocation.args.map((arg: Graph) => refs.decode(arg));
+    const kernel = operation.startsWith('fs.')
+      ? files
+      : operation.startsWith('net.')
+        ? network
+        : http;
+    void kernel.execute(operation, args).then(
+      (value) => finish(true, refs.encode(value)),
+      (error) => finish(false, error),
+    );
+    return;
+  }
   if (message.invocation.operation === 'module') {
     const [specifier, mode, origin] = message.invocation.args.map((arg: Graph) => refs.decode(arg));
     if (mode === 'namespace' || mode === 'default') {
