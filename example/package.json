@@ -20,6 +20,7 @@
     "express": "^5.2.1",
     "hono": "^4.13.7",
     "lumiana": "file:..",
+    "sharp": "^0.35.4",
     "systeminformation": "^5.33.8"
   }
 }

@@ -1,107 +1,112 @@
 // @ts-nocheck
-import chokidar from 'chokidar';
-import { mkdtemp, writeFile, appendFile, unlink, rm } from 'node:fs/promises';
-import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import sharp from "sharp"
 
-const output = document.createElement('pre');
-document.body.replaceChildren(output);
-
-const results = {
-  success: false,
-  events: [],
-};
-
-function render(stage) {
-  output.textContent = JSON.stringify({ stage, ...results }, null, 2);
-}
-
-function waitForEvent(watcher, expected, timeout = 5000) {
-  return new Promise((resolve, reject) => {
-    const timer = setTimeout(() => {
-      watcher.off('all', listener);
-      reject(new Error(`Timed out waiting for "${expected}"`));
-    }, timeout);
-
-    function listener(event, path) {
-      results.events.push({ event, path });
-      render(`received: ${event}`);
-
-      if (event === expected) {
-        clearTimeout(timer);
-        watcher.off('all', listener);
-        resolve(path);
-      }
-    }
-
-    watcher.on('all', listener);
-  });
-}
-
-const directory = await mkdtemp(join(tmpdir(), 'lumiana-watch-'));
-
-const file = join(directory, 'message.txt');
-let watcher;
+document.body.textContent = "Generating image with Node sharp..."
 
 try {
-  render('creating watcher');
+  const svg = `
+    <svg width="800" height="500"
+         xmlns="http://www.w3.org/2000/svg">
+      <defs>
+        <linearGradient id="background" x1="0" y1="0" x2="1" y2="1">
+          <stop offset="0%" stop-color="#6828ff"/>
+          <stop offset="100%" stop-color="#00d4ff"/>
+        </linearGradient>
+      </defs>
 
-  watcher = chokidar.watch(directory, {
-    ignoreInitial: true,
-    awaitWriteFinish: {
-      stabilityThreshold: 100,
-      pollInterval: 20,
+      <rect width="800" height="500" rx="48"
+            fill="url(#background)"/>
+
+      <circle cx="400" cy="190" r="95"
+              fill="rgba(255,255,255,0.22)"/>
+
+      <text x="400" y="215"
+            text-anchor="middle"
+            font-family="sans-serif"
+            font-weight="bold"
+            font-size="72"
+            fill="white">
+        Lumiana
+      </text>
+
+      <text x="400" y="350"
+            text-anchor="middle"
+            font-family="sans-serif"
+            font-size="30"
+            fill="white">
+        Native Node → Browser DOM
+      </text>
+    </svg>
+  `
+
+  // قيمة ثنائية منشأة في المتصفح وتعبر إلى sharp على الخادم
+  const input = new TextEncoder().encode(svg)
+
+  const pipeline = sharp(input)
+    .resize({
+      width: 600,
+      height: 375,
+      fit: "cover",
+    })
+    .png({
+      compressionLevel: 9,
+    })
+
+  // مرجع pipeline بعيد مع استدعاءات متسلسلة
+  const metadata = await pipeline.metadata()
+
+  // البيانات الثنائية تعود من Node إلى المتصفح
+  const imageBytes = await pipeline.toBuffer()
+
+  const blob = new Blob(
+    [imageBytes],
+    { type: "image/png" },
+  )
+
+  const imageURL = URL.createObjectURL(blob)
+
+  const image = document.createElement("img")
+  image.src = imageURL
+  image.width = 600
+  image.height = 375
+  image.style.display = "block"
+  image.style.maxWidth = "100%"
+  image.style.borderRadius = "24px"
+
+  const result = document.createElement("pre")
+  result.textContent = JSON.stringify(
+    {
+      success: true,
+      sharpMetadata: metadata,
+      returnedBinary: {
+        constructor: imageBytes.constructor.name,
+        byteLength: imageBytes.byteLength,
+        isUint8Array: imageBytes instanceof Uint8Array,
+        blobType: blob.type,
+        blobSize: blob.size,
+      },
+      renderedInDOM: true,
     },
-  });
+    null,
+    2,
+  )
 
-  await new Promise((resolve, reject) => {
-    const timer = setTimeout(() => reject(new Error('Watcher did not become ready')), 5000);
+  document.body.replaceChildren(image, result)
 
-    watcher.once('ready', () => {
-      clearTimeout(timer);
-      resolve();
-    });
-  });
-
-  render('creating file');
-  const added = waitForEvent(watcher, 'add');
-  await writeFile(file, 'Hello');
-  await added;
-
-  render('modifying file');
-  const changed = waitForEvent(watcher, 'change');
-  await appendFile(file, ' from Lumiana');
-  await changed;
-
-  render('deleting file');
-  const deleted = waitForEvent(watcher, 'unlink');
-  await unlink(file);
-  await deleted;
-
-  results.success = true;
-  results.summary = {
-    addReceived: results.events.some((item) => item.event === 'add'),
-    changeReceived: results.events.some((item) => item.event === 'change'),
-    unlinkReceived: results.events.some((item) => item.event === 'unlink'),
-    callbackUpdatedDOM: true,
-  };
-
-  render('completed');
+  window.addEventListener(
+    "beforeunload",
+    () => URL.revokeObjectURL(imageURL),
+    { once: true },
+  )
 } catch (error) {
-  results.error = {
-    name: error.name,
-    message: error.message,
-    stack: error.stack,
-  };
-
-  render('failed');
-} finally {
-  if (watcher) {
-    await watcher.close();
-  }
-
-  await rm(directory, {
-    recursive: true,
-    force: true,
-  });
+  document.body.textContent = JSON.stringify(
+    {
+      success: false,
+      name: error.name,
+      message: error.message,
+      stack: error.stack,
+    },
+    null,
+    2,
+  )
 }
