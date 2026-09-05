@@ -570,7 +570,8 @@ export function syncNodeCall(
   path: string[],
   args: unknown[] | null,
   isCall: boolean = true,
-  isConstructor: boolean = false
+  isConstructor: boolean = false,
+  isSet: boolean = false
 ): unknown {
   if (!lumiana.connected()) {
     throw new Error('[Lumiana] No active connection. Call connect.credentials() before using Node modules.');
@@ -593,7 +594,7 @@ export function syncNodeCall(
   }
 
   const marshalledArgs = args !== null ? args.map(marshallValue) : null;
-  const payload = JSON.stringify({ refId, path, args: marshalledArgs, isCall, isConstructor });
+  const payload = JSON.stringify({ refId, path, args: marshalledArgs, isCall, isConstructor, isSet });
 
   try {
     xhr.send(payload);
@@ -630,12 +631,27 @@ const globalLocalCallbacks = new Map<string, (...args: unknown[]) => unknown>();
 
 function marshallValue(value: unknown): unknown {
   if (typeof value === 'function') {
+    if ((value as any).__lumiana_proxy_info__) {
+      const info = (value as any).__lumiana_proxy_info__;
+      if (info.refId && info.path.length === 0) {
+        return { __lumiana_ref__: info.refId };
+      }
+      const resolved = syncNodeCall(info.refId, info.path, null, false);
+      return marshallValue(resolved);
+    }
     const cbId = 'cb_' + Math.random().toString(36).slice(2) + Date.now().toString(36);
     globalLocalCallbacks.set(cbId, value as (...args: unknown[]) => unknown);
     return { __lumiana_cb__: cbId };
   }
   if (value instanceof Uint8Array) {
-    return { __lumiana_bin__: Array.from(value) };
+    let binary = '';
+    const len = value.length;
+    const CHUNK_SIZE = 0x8000;
+    for (let i = 0; i < len; i += CHUNK_SIZE) {
+      binary += String.fromCharCode.apply(null, value.subarray(i, Math.min(i + CHUNK_SIZE, len)) as any);
+    }
+    const b64 = typeof btoa !== 'undefined' ? btoa(binary) : Buffer.from(value).toString('base64');
+    return { __lumiana_bin64__: b64 };
   }
   if (Array.isArray(value)) {
     return value.map(marshallValue);
@@ -706,6 +722,13 @@ function wrapStatsObject(obj: Record<string, any>): Record<string, any> {
 function unmarshallValue(data: unknown): unknown {
   if (data === null || data === undefined) return data;
   if (typeof data === 'object') {
+    if ((data as any).name && (data as any).message && typeof (data as any).stack === 'string') {
+      const err = new Error((data as any).message);
+      err.name = (data as any).name;
+      err.stack = (data as any).stack;
+      if ((data as any).code) (err as any).code = (data as any).code;
+      return err;
+    }
     if ((data as { __lumiana_ref__?: string }).__lumiana_ref__) {
       const refId = (data as { __lumiana_ref__: string }).__lumiana_ref__;
       const staticProps: Record<string, unknown> = {};
@@ -716,8 +739,15 @@ function unmarshallValue(data: unknown): unknown {
       }
       return createNodeModuleProxy('ref', [], refId, staticProps);
     }
-    if ((data as { __lumiana_bin__?: number[] }).__lumiana_bin__) {
-      return LumianaBuffer.from((data as { __lumiana_bin__: number[] }).__lumiana_bin__);
+    if ((data as any).__lumiana_bin64__) {
+      return LumianaBuffer.from((data as any).__lumiana_bin64__, 'base64');
+    }
+    if ((data as { __lumiana_bin__?: any }).__lumiana_bin__) {
+      const raw = (data as any).__lumiana_bin__;
+      if (typeof raw === 'string') {
+        return LumianaBuffer.from(raw, 'base64');
+      }
+      return LumianaBuffer.from(raw);
     }
     if ((data as any)?.__lumiana_request__) {
       const reqData = data as any;
@@ -772,44 +802,125 @@ function unmarshallValue(data: unknown): unknown {
   return data;
 }
 
+const DEFAULT_BUILTIN_STATICS: Record<string, Record<string, unknown>> = {
+  http: {
+    METHODS: [
+      'ACL', 'BIND', 'CHECKOUT', 'CONNECT', 'COPY', 'DELETE', 'GET', 'HEAD',
+      'LINK', 'LOCK', 'M-SEARCH', 'MERGE', 'MKACTIVITY', 'MKCALENDAR', 'MKCOL',
+      'MOVE', 'NOTIFY', 'OPTIONS', 'PATCH', 'POST', 'PROPFIND', 'PROPPATCH',
+      'PURGE', 'PUT', 'REBIND', 'REPORT', 'SEARCH', 'SOURCE', 'SUBSCRIBE',
+      'TRACE', 'UNBIND', 'UNLINK', 'UNLOCK', 'UNSUBSCRIBE'
+    ],
+    STATUS_CODES: {
+      '100': 'Continue', '101': 'Switching Protocols', '102': 'Processing', '103': 'Early Hints',
+      '200': 'OK', '201': 'Created', '202': 'Accepted', '203': 'Non-Authoritative Information',
+      '204': 'No Content', '205': 'Reset Content', '206': 'Partial Content', '207': 'Multi-Status',
+      '208': 'Already Reported', '226': 'IM Used', '300': 'Multiple Choices', '301': 'Moved Permanently',
+      '302': 'Found', '303': 'See Other', '304': 'Not Modified', '305': 'Use Proxy', '307': 'Temporary Redirect',
+      '308': 'Permanent Redirect', '400': 'Bad Request', '401': 'Unauthorized', '402': 'Payment Required',
+      '403': 'Forbidden', '404': 'Not Found', '405': 'Method Not Allowed', '406': 'Not Acceptable',
+      '407': 'Proxy Authentication Required', '408': 'Request Timeout', '409': 'Conflict', '410': 'Gone',
+      '411': 'Length Required', '412': 'Precondition Failed', '413': 'Payload Too Large', '414': 'URI Too Long',
+      '415': 'Unsupported Media Type', '416': 'Range Not Satisfiable', '417': 'Expectation Failed',
+      '418': "I'm a Teapot", '421': 'Misdirected Request', '422': 'Unprocessable Entity', '423': 'Locked',
+      '424': 'Failed Dependency', '425': 'Too Early', '426': 'Upgrade Required', '428': 'Precondition Required',
+      '429': 'Too Many Requests', '431': 'Request Header Fields Too Large', '451': 'Unavailable For Legal Reasons',
+      '500': 'Internal Server Error', '501': 'Not Implemented', '502': 'Bad Gateway', '503': 'Service Unavailable',
+      '504': 'Gateway Timeout', '505': 'HTTP Version Not Supported', '506': 'Variant Also Negotiates',
+      '507': 'Insufficient Storage', '508': 'Loop Detected', '509': 'Bandwidth Limit Exceeded',
+      '510': 'Not Extended', '511': 'Network Authentication Required'
+    },
+    maxHeaderSize: 16384,
+  },
+};
+DEFAULT_BUILTIN_STATICS['node:http'] = DEFAULT_BUILTIN_STATICS['http'];
+DEFAULT_BUILTIN_STATICS['https'] = DEFAULT_BUILTIN_STATICS['http'];
+DEFAULT_BUILTIN_STATICS['node:https'] = DEFAULT_BUILTIN_STATICS['http'];
+
 export function createNodeModuleProxy(
   moduleName: string,
   path: string[] = [moduleName],
   refId: string | null = null,
   staticValues: Record<string, unknown> = {}
 ): any {
+  const cleanMod = moduleName.startsWith('node:') ? moduleName.slice(5) : moduleName;
+  const defaultStatics = DEFAULT_BUILTIN_STATICS[cleanMod] || {};
+  const activeStatics: Record<string, unknown> = (path.length <= 1 && !refId)
+    ? { ...defaultStatics, ...staticValues }
+    : staticValues;
+
   const dummy = function () {};
 
   return new Proxy(dummy, {
     get(_target, prop: string | symbol) {
+      if (typeof prop === 'string') {
+        if (prop === '__lumiana_proxy_info__') {
+          return { moduleName, path, refId };
+        }
+        if (prop === '__lumiana_ref__') {
+          return refId && path.length === 0 ? refId : undefined;
+        }
+        if (prop in activeStatics) {
+          return activeStatics[prop];
+        }
+        if (prop === 'default' && path.length === 1 && !refId) {
+          return createNodeModuleProxy(moduleName, path, refId, activeStatics);
+        }
+        if (prop === 'then') {
+          if (path.length === 0) return undefined;
+          return (onFulfilled?: (val: any) => any, onRejected?: (err: any) => any) => {
+            try {
+              const res = syncNodeCall(refId, path, null, false);
+              return Promise.resolve(res).then(onFulfilled, onRejected);
+            } catch (err) {
+              return Promise.reject(err).catch(onRejected);
+            }
+          };
+        }
+        if (prop === 'valueOf') {
+          return () => {
+            if (path.length === 0) return dummy;
+            try {
+              return syncNodeCall(refId, path, null, false);
+            } catch {
+              return dummy;
+            }
+          };
+        }
+        if (prop === 'toJSON') {
+          return () => {
+            if (path.length === 0) return {};
+            try {
+              return syncNodeCall(refId, path, null, false);
+            } catch {
+              return {};
+            }
+          };
+        }
+        if (prop === 'promises') {
+          return createNodeModuleProxy(moduleName, [...path, 'promises'], refId, {});
+        }
+        return createNodeModuleProxy(moduleName, [...path, prop], refId, {});
+      }
+
       if (typeof prop === 'symbol') {
         if (prop in _target) return (_target as any)[prop];
         if (prop === Symbol.toStringTag) return `[NodeModule ${moduleName}]`;
-        if (prop === Symbol.toPrimitive) return () => `[NodeModule ${moduleName} ${path.join('.')}]`;
+        if (prop === Symbol.toPrimitive) {
+          return (hint: string) => {
+            if (path.length === 0) return `[NodeModule ${moduleName}]`;
+            try {
+              const res = syncNodeCall(refId, path, null, false);
+              return res !== undefined && res !== null ? (typeof res === 'object' ? String(res) : res) : '';
+            } catch {
+              return `[NodeModule ${moduleName} ${path.join('.')}]`;
+            }
+          };
+        }
         return undefined;
       }
 
-      if (typeof prop === 'string' && prop in staticValues) {
-        return staticValues[prop];
-      }
-
-      if (prop === 'then') {
-        if (path.length === 0) return undefined;
-        return (onFulfilled?: (val: any) => any, onRejected?: (err: any) => any) => {
-          try {
-            const res = syncNodeCall(refId, path, null, false);
-            return Promise.resolve(res).then(onFulfilled, onRejected);
-          } catch (err) {
-            return Promise.reject(err).catch(onRejected);
-          }
-        };
-      }
-
-      if (prop === 'promises') {
-        return createNodeModuleProxy(moduleName, [...path, 'promises'], refId, {});
-      }
-
-      return createNodeModuleProxy(moduleName, [...path, prop], refId, {});
+      return undefined;
     },
 
     set(_target, prop: string | symbol, val: any) {
@@ -817,7 +928,7 @@ export function createNodeModuleProxy(
         staticValues[prop] = val;
         if (refId) {
           try {
-            syncNodeCall(refId, [prop], [val], true);
+            syncNodeCall(refId, [prop], [val], false, false, true);
           } catch {}
         }
       } else {
@@ -831,14 +942,11 @@ export function createNodeModuleProxy(
     },
 
     apply(_target, _thisArg, args: unknown[]) {
-      // If path includes 'promises', return a Promise
-      if (path.includes('promises')) {
+      if (path.some((p) => p.includes('promises')) || moduleName.includes('promises')) {
         return Promise.resolve().then(() => {
           return syncNodeCall(refId, path, args, true);
         });
       }
-
-      // Default: Synchronous execution matching Node behavior!
       return syncNodeCall(refId, path, args, true);
     },
   });
@@ -864,6 +972,16 @@ function getInternalWsUrl(username: string, password: string): string {
 }
 
 function createProcessObject(): any {
+  let realInfo: any = null;
+  function getProcInfo() {
+    if (!realInfo && lumiana.connected()) {
+      try {
+        realInfo = syncNodeCall(null, ['process', '__lumiana_info__'], null, false);
+      } catch {}
+    }
+    return realInfo || {};
+  }
+
   let cachedEnv: Record<string, string> = {};
   try {
     const rawEnv = syncNodeCall(null, ['process', 'env'], null, false);
@@ -893,15 +1011,15 @@ function createProcessObject(): any {
 
   const proc: any = {
     env: envProxy,
-    version: 'v22.0.0',
-    versions: { node: '22.0.0', v8: '12.0', lumiana: '0.2.0' },
-    platform: typeof navigator !== 'undefined' && /Mac/.test(navigator.userAgent) ? 'darwin' : 'linux',
-    arch: 'x64',
-    pid: 12345,
-    ppid: 1,
+    get version() { return getProcInfo().version || 'v22.0.0'; },
+    get versions() { return getProcInfo().versions || { node: '22.0.0' }; },
+    get platform() { return getProcInfo().platform || (typeof navigator !== 'undefined' && /Mac/.test(navigator.userAgent) ? 'darwin' : 'linux'); },
+    get arch() { return getProcInfo().arch || 'x64'; },
+    get pid() { return getProcInfo().pid || 12345; },
+    get ppid() { return getProcInfo().ppid || 1; },
     title: 'lumiana',
-    argv: ['node', '/app/index.js'],
-    execPath: '/usr/local/bin/node',
+    get argv() { return getProcInfo().argv || ['node', '/app/index.js']; },
+    get execPath() { return getProcInfo().execPath || 'node'; },
     cwd: () => {
       try {
         const c = syncNodeCall(null, ['process', 'cwd'], [], true);
@@ -1014,6 +1132,15 @@ export async function lumianaSmartFetch(
       return originalFetch(input, init);
     }
     throw new Error(`[Lumiana fetch] No browser fetch available for internal URL: ${urlString}`);
+  }
+
+  // If fetching local server (e.g. localhost or 127.0.0.1), try direct browser fetch first
+  if (originalFetch && (urlString.startsWith('http://localhost:') || urlString.startsWith('http://127.0.0.1:'))) {
+    try {
+      return await originalFetch(input, init);
+    } catch {
+      // Direct browser fetch failed (e.g. CORS not permitted or network error) -> fallback to Node proxy
+    }
   }
 
   // External / Cross-Origin URL -> Requires active connection to Node.js!
@@ -1139,6 +1266,16 @@ export async function lumianaSmartFetch(
 }
 
 export function setupBrowserEnvironment(): void {
+  const setupRequire = (target: any) => {
+    if (typeof target.require === 'undefined') {
+      target.require = function (id: string) {
+        const cleanId = id.startsWith('node:') ? id.slice(5) : id;
+        if (cleanId === 'buffer') return LumianaBuffer;
+        return createNodeModuleProxy(cleanId, [cleanId]);
+      };
+    }
+  };
+
   if (typeof window !== 'undefined') {
     if (!(window as any).__lumiana_original_fetch__ && typeof window.fetch === 'function') {
       (window as any).__lumiana_original_fetch__ = window.fetch.bind(window);
@@ -1151,16 +1288,33 @@ export function setupBrowserEnvironment(): void {
       (window as any).setImmediate = (fn: any, ...args: any[]) => setTimeout(fn, 0, ...args);
       (window as any).clearImmediate = (id: any) => clearTimeout(id);
     }
+    setupRequire(window);
   }
   if (typeof globalThis !== 'undefined') {
-    if (!(globalThis as any).__lumiana_original_fetch__ && typeof globalThis.fetch === 'function' && globalThis.fetch !== lumianaSmartFetch) {
-      (globalThis as any).__lumiana_original_fetch__ = globalThis.fetch.bind(globalThis);
+    const isBrowser = typeof window !== 'undefined' || typeof document !== 'undefined';
+    if (isBrowser) {
+      if (!(globalThis as any).__lumiana_original_fetch__ && typeof globalThis.fetch === 'function' && globalThis.fetch !== lumianaSmartFetch) {
+        (globalThis as any).__lumiana_original_fetch__ = globalThis.fetch.bind(globalThis);
+      }
+      (globalThis as any).fetch = lumianaSmartFetch;
+      (globalThis as any).global = globalThis;
+      (globalThis as any).Buffer = LumianaBuffer;
+      (globalThis as any).process = createProcessObject();
+      setupRequire(globalThis);
+    } else {
+      if (typeof (globalThis as any).process === 'undefined') {
+        (globalThis as any).process = createProcessObject();
+      }
+      if (typeof (globalThis as any).Buffer === 'undefined') {
+        (globalThis as any).Buffer = LumianaBuffer;
+      }
     }
-    (globalThis as any).fetch = lumianaSmartFetch;
-    (globalThis as any).global = globalThis;
-    (globalThis as any).Buffer = LumianaBuffer;
-    (globalThis as any).process = createProcessObject();
   }
+}
+
+// Auto-initialize browser environment when client module loads
+if (typeof window !== 'undefined' || typeof globalThis !== 'undefined') {
+  setupBrowserEnvironment();
 }
 
 async function baseConnect(creds?: Credentials): Promise<LumianaClient> {
@@ -1187,8 +1341,8 @@ async function baseConnect(creds?: Credentials): Promise<LumianaClient> {
         globalLocalCallbacks.set(cbId, value as (...args: unknown[]) => unknown);
         return { __lumiana_cb__: cbId };
       }
-      if (value instanceof Uint8Array) {
-        return { __lumiana_bin__: Array.from(value) };
+      if (value instanceof Uint8Array || (typeof Buffer !== 'undefined' && Buffer.isBuffer(value))) {
+        return { __lumiana_bin64__: LumianaBuffer.from(value).toString('base64') };
       }
       if (Array.isArray(value)) {
         return value.map(marshall);
@@ -1224,6 +1378,13 @@ async function baseConnect(creds?: Credentials): Promise<LumianaClient> {
     function unmarshall(data: unknown): unknown {
       if (data === null || data === undefined) return data;
       if (typeof data === 'object') {
+        if ((data as any).name && (data as any).message && typeof (data as any).stack === 'string') {
+          const err = new Error((data as any).message);
+          err.name = (data as any).name;
+          err.stack = (data as any).stack;
+          if ((data as any).code) (err as any).code = (data as any).code;
+          return err;
+        }
         if ((data as { __lumiana_ref__?: string }).__lumiana_ref__) {
           const refId = (data as { __lumiana_ref__: string }).__lumiana_ref__;
           const staticProps: Record<string, unknown> = {};
@@ -1234,8 +1395,12 @@ async function baseConnect(creds?: Credentials): Promise<LumianaClient> {
           }
           return createNodeProxy([], refId, staticProps);
         }
-        if ((data as { __lumiana_bin__?: number[] }).__lumiana_bin__) {
-          return LumianaBuffer.from((data as { __lumiana_bin__: number[] }).__lumiana_bin__);
+        if ((data as any).__lumiana_bin64__) {
+          return LumianaBuffer.from((data as any).__lumiana_bin64__, 'base64');
+        }
+        if ((data as any).__lumiana_bin__) {
+          const raw = (data as any).__lumiana_bin__;
+          return typeof raw === 'string' ? LumianaBuffer.from(raw, 'base64') : LumianaBuffer.from(raw);
         }
         if ((data as any)?.__lumiana_request__) {
           const reqData = data as any;
@@ -1362,7 +1527,10 @@ async function baseConnect(creds?: Credentials): Promise<LumianaClient> {
             if (res.ok) {
               req.resolve(unmarshall(res.result));
             } else {
-              req.reject(new Error(res.error || 'Execution failed'));
+              const err = new Error(res.error || 'Execution failed');
+              if ((res as any).code) (err as any).code = (res as any).code;
+              if ((res as any).stack) err.stack = (res as any).stack;
+              req.reject(err);
             }
           }
         } catch (e) {
@@ -1426,6 +1594,62 @@ async function baseConnect(creds?: Credentials): Promise<LumianaClient> {
           }
         } catch (err) {
           console.error('[Lumiana] Failed to invoke callback:', err);
+        }
+        return;
+      }
+
+      // Opcode 0x0B = WORKER_CONSOLE_LOG
+      if (opcode === 0x0B) {
+        const text = new TextDecoder().decode(data.subarray(1));
+        try {
+          const { level, args } = JSON.parse(text);
+          const unmarshalledArgs = Array.isArray(args) ? args.map(unmarshall) : [];
+          const consoleFn = (console as any)[level] || console.log;
+          let badgeBg = '#2563eb';
+          if (level === 'warn') badgeBg = '#d97706';
+          else if (level === 'error') badgeBg = '#dc2626';
+          else if (level === 'debug') badgeBg = '#6b7280';
+          const badgeStyle = `background: ${badgeBg}; color: white; padding: 2px 5px; border-radius: 3px; font-weight: bold; font-size: 10px;`;
+          consoleFn('%cNode Worker', badgeStyle, ...unmarshalledArgs);
+        } catch (e) {
+          console.error('[Lumiana] Failed to parse worker log:', e);
+        }
+        return;
+      }
+
+      // Opcode 0x0C = WORKER_FATAL_ERROR
+      if (opcode === 0x0C) {
+        const text = new TextDecoder().decode(data.subarray(1));
+        try {
+          const errInfo = JSON.parse(text);
+          const err = new Error(errInfo.message || 'Node Worker Fatal Error');
+          if (errInfo.stack) err.stack = errInfo.stack;
+          Object.assign(err, errInfo);
+
+          console.error(
+            '%cNode Worker Fatal Error',
+            'background: #dc2626; color: white; padding: 2px 6px; border-radius: 3px; font-weight: bold; font-size: 11px;',
+            err
+          );
+
+          pendingRequests.forEach(({ reject }) => reject(err));
+          pendingRequests.clear();
+
+          if (typeof window !== 'undefined' && typeof window.dispatchEvent === 'function') {
+            window.dispatchEvent(
+              new ErrorEvent('error', {
+                error: err,
+                message: `[Node Worker Fatal Error] ${errInfo.message || String(err)}`,
+                filename: errInfo.path || 'worker.mjs',
+              })
+            );
+          }
+
+          setTimeout(() => {
+            throw err;
+          }, 0);
+        } catch (e) {
+          console.error('[Lumiana] Failed to parse fatal error from worker:', e);
         }
         return;
       }

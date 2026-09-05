@@ -17,6 +17,7 @@ import {
   IN_MEMORY_PROCESS_CODE,
   IN_MEMORY_ASSERT_CODE,
   IN_MEMORY_STRING_DECODER_CODE,
+  IN_MEMORY_PERF_HOOKS_CODE,
 } from './in-memory-modules.js';
 
 export interface LumianaPluginOptions {
@@ -213,25 +214,226 @@ async function importProjectModule(modName, projectRoot = process.cwd()) {
     }
   }
 }
-function isNodeTargetModule(id, options) {
-  if (id.startsWith("\0") || id.startsWith("/@") || id.startsWith(".") || id.startsWith("/") || id.includes("?")) {
+
+var JS_RESERVED_WORDS = new Set([
+  "break", "case", "catch", "class", "const", "continue", "debugger", "default",
+  "delete", "do", "else", "export", "extends", "finally", "for", "function", "if",
+  "import", "in", "instanceof", "new", "return", "super", "switch", "this", "throw",
+  "try", "typeof", "var", "void", "while", "with", "yield", "enum", "await",
+  "implements", "interface", "let", "package", "private", "protected", "public", "static"
+]);
+
+function matchesModulePattern(id, pattern) {
+  if (pattern === "*") return true;
+  if (pattern.endsWith("/*")) {
+    const prefix = pattern.slice(0, -2);
+    return id === prefix || id.startsWith(prefix + "/");
+  }
+  if (pattern.endsWith("-*")) {
+    const prefix = pattern.slice(0, -2);
+    return id.startsWith(prefix + "-");
+  }
+  return id === pattern || id.startsWith(pattern + "/");
+}
+
+const autoDetectNodeModuleCache = new Map();
+
+function isNodePackageByInspection(cleanId, projectRoot = process.cwd()) {
+  if (autoDetectNodeModuleCache.has(cleanId)) {
+    return autoDetectNodeModuleCache.get(cleanId);
+  }
+
+  if (
+    !cleanId ||
+    cleanId.startsWith('.') ||
+    cleanId.startsWith('/') ||
+    cleanId.startsWith('\0') ||
+    cleanId.includes('?')
+  ) {
+    autoDetectNodeModuleCache.set(cleanId, false);
+    return false;
+  }
+
+  const basePkg = cleanId.startsWith('@')
+    ? cleanId.split('/').slice(0, 2).join('/')
+    : cleanId.split('/')[0];
+
+  try {
+    let pkgJsonPath = null;
+    try {
+      const req = createRequire(path.join(projectRoot, 'package.json'));
+      pkgJsonPath = req.resolve(basePkg + '/package.json');
+    } catch {
+      try {
+        const candidate = path.join(projectRoot, 'node_modules', basePkg, 'package.json');
+        if (fs.existsSync(candidate)) pkgJsonPath = candidate;
+      } catch {}
+    }
+
+    if (!pkgJsonPath) {
+      try {
+        const req = createRequire(path.join(process.cwd(), 'dummy.js'));
+        pkgJsonPath = req.resolve(basePkg + '/package.json');
+      } catch {}
+    }
+
+    if (!pkgJsonPath || !fs.existsSync(pkgJsonPath)) {
+      autoDetectNodeModuleCache.set(cleanId, false);
+      return false;
+    }
+
+    let pkgJson = {};
+    try {
+      pkgJson = JSON.parse(fs.readFileSync(pkgJsonPath, 'utf-8'));
+    } catch {
+      autoDetectNodeModuleCache.set(cleanId, false);
+      return false;
+    }
+
+    // Determine the entry point that would be imported
+    let entryRelative = null;
+    if (pkgJson.exports) {
+      const subpath = cleanId === basePkg ? '.' : '.' + cleanId.slice(basePkg.length);
+      const exp = pkgJson.exports[subpath] || pkgJson.exports['.'] || pkgJson.exports;
+      if (typeof exp === 'string') {
+        entryRelative = exp;
+      } else if (exp && typeof exp === 'object') {
+        entryRelative =
+          exp.browser?.import ||
+          exp.browser ||
+          exp.import ||
+          exp.module ||
+          exp.default ||
+          exp.require;
+        if (typeof entryRelative === 'object') {
+          entryRelative = entryRelative.default || entryRelative.import || entryRelative.require;
+        }
+      }
+    }
+
+    if (!entryRelative) {
+      entryRelative = pkgJson.browser || pkgJson.module || pkgJson.main || 'index.js';
+    }
+
+    if (typeof entryRelative !== 'string') {
+      autoDetectNodeModuleCache.set(cleanId, false);
+      return false;
+    }
+
+    const entryFullPath = path.resolve(path.dirname(pkgJsonPath), entryRelative);
+    if (!fs.existsSync(entryFullPath)) {
+      autoDetectNodeModuleCache.set(cleanId, false);
+      return false;
+    }
+
+    // Inspect the entry file for CJS / Node indicators
+    const fd = fs.openSync(entryFullPath, 'r');
+    const buffer = Buffer.alloc(65536);
+    const bytesRead = fs.readSync(fd, buffer, 0, 65536, 0);
+    fs.closeSync(fd);
+    const content = buffer.toString('utf-8', 0, bytesRead);
+
+    const hasRequire = /\brequire\s*\(/.test(content);
+    const hasModuleExports = /\bmodule\.exports\b/.test(content);
+    const hasExportsAssign = /\bexports\.[a-zA-Z_$]/.test(content);
+    const hasNodeBuiltin =
+      /\brequire\s*\(\s*['"](node:)?[a-z_]+['"]\s*\)/.test(content) ||
+      /\bfrom\s*['"]node:[a-z_]+['"]/.test(content);
+
+    const isNode = hasRequire || hasModuleExports || hasExportsAssign || hasNodeBuiltin;
+    autoDetectNodeModuleCache.set(cleanId, isNode);
+    return isNode;
+  } catch {
+    autoDetectNodeModuleCache.set(cleanId, false);
+    return false;
+  }
+}
+
+function isNodeTargetModule(id, options, projectRoot = process.cwd()) {
+  if (!id || id.startsWith("\0") || id.startsWith("/@") || id.startsWith(".") || id.startsWith("/") || id.includes("?")) {
+    return false;
+  }
+  if (id === "virtual:lumiana" || id === "lumiana" || id === "lumiana/client") {
     return false;
   }
   const cleanId = id.startsWith("node:") ? id.slice(5) : id;
   if (id.startsWith("node:") || NODE_BUILTIN_LIST.includes(cleanId)) {
     return true;
   }
+
+  // Explicit browser module overrides (never treat as node)
+  const browserList = options?.browserModules || [];
+  for (const item of browserList) {
+    if (typeof item === "string") {
+      if (matchesModulePattern(cleanId, item)) {
+        return false;
+      }
+    } else if (item instanceof RegExp && item.test(cleanId)) {
+      return false;
+    }
+  }
+
+  // Explicit node module overrides (always treat as node)
   const customList = options?.nodeModules || [];
   for (const item of customList) {
     if (typeof item === "string") {
-      if (item === "*" || cleanId === item || cleanId.startsWith(item + "/")) {
+      if (matchesModulePattern(cleanId, item)) {
         return true;
       }
     } else if (item instanceof RegExp && item.test(cleanId)) {
       return true;
     }
   }
+
+  // Automatic detection: inspect the package
+  if (options?.autoDetectNodeModules !== false) {
+    return isNodePackageByInspection(cleanId, projectRoot);
+  }
+
   return false;
+}
+
+function transformRequireBuiltins(code, id, options, projectRoot = process.cwd()) {
+  if (!code || typeof code !== "string" || !code.includes("require(")) return null;
+  if (id && (id.includes("\0virtual:lumiana") || id.includes("client.ts") || id.includes("client.js") || id.includes("node_modules"))) {
+    return null;
+  }
+  const requireRegex = /\brequire\s*\(\s*(['"])([^'"]+)\1\s*\)/g;
+  let match;
+  const importsToInject = [];
+  let counter = 0;
+  const modToVar = new Map();
+
+  while ((match = requireRegex.exec(code)) !== null) {
+    const rawId = match[2];
+    const cleanId = rawId.startsWith("node:") ? rawId.slice(5) : rawId;
+    if (isNodeTargetModule(rawId, options, projectRoot) || isNodeTargetModule(cleanId, options, projectRoot)) {
+      if (!modToVar.has(rawId)) {
+        const varName = `__lum_req_${counter++}_${cleanId.replace(/[^a-zA-Z0-9_$]/g, "_")}`;
+        modToVar.set(rawId, varName);
+        importsToInject.push({ mod: rawId, varName });
+      }
+    }
+  }
+
+  if (importsToInject.length === 0) return null;
+
+  const newCode = code.replace(/\brequire\s*\(\s*(['"])([^'"]+)\1\s*\)/g, (fullMatch, _quote, rawId) => {
+    const varName = modToVar.get(rawId);
+    if (varName) {
+      return `(${varName}.default !== undefined ? ${varName}.default : ${varName})`;
+    }
+    return fullMatch;
+  });
+
+  const header = importsToInject
+    .map(({ mod, varName }) => `import * as ${varName} from ${JSON.stringify(mod)};`)
+    .join("\n");
+
+  return {
+    code: `${header}\n${newCode}`,
+    map: null
+  };
 }
 var latestActiveWorker = null;
 var activeWorkers = new Set();
@@ -264,15 +466,39 @@ Sec-WebSocket-Accept: ${accept}\r
   activeWorkers.add(worker);
   latestActiveWorker = worker;
 
+  function sendFatalErrorOverSocket(err: any) {
+    if (socket.writable) {
+      try {
+        const errorInfo = {
+          message: err?.message || String(err),
+          stack: err?.stack || '',
+          code: err?.code,
+          errno: err?.errno,
+          syscall: err?.syscall,
+          path: err?.path,
+          spawnargs: err?.spawnargs,
+        };
+        const payload = JSON.stringify(errorInfo);
+        const packet = Buffer.concat([Buffer.from([0x0C]), Buffer.from(payload, 'utf-8')]);
+        socket.write(encodeBinaryFrame(packet));
+      } catch {}
+    }
+  }
+
   worker.on("message", (msg) => {
     if (msg?.type === "WS_SEND") {
-      const data = Buffer.isBuffer(msg.data) ? msg.data : Buffer.from(msg.data);
-      socket.write(encodeBinaryFrame(data));
+      try {
+        if (socket.writable) {
+          const data = Buffer.isBuffer(msg.data) ? msg.data : Buffer.from(msg.data);
+          socket.write(encodeBinaryFrame(data));
+        }
+      } catch {}
     }
   });
 
   worker.on("error", (err) => {
     console.error("[Lumiana Worker Error]", err);
+    sendFatalErrorOverSocket(err);
   });
 
   worker.on("exit", (code) => {
@@ -282,6 +508,7 @@ Sec-WebSocket-Accept: ${accept}\r
     }
     if (code !== 0 && code !== 1 && code !== null) {
       console.error(`[Lumiana Worker Exit] Worker stopped with exit code ${code}`);
+      sendFatalErrorOverSocket(new Error(`Worker thread stopped unexpectedly with exit code ${code}`));
     }
   });
 
@@ -390,6 +617,7 @@ function lumiana(options = {}) {
   let baseOutDir = "dist";
   let projectRoot = process.cwd();
   let isBuild = false;
+  const usedNodeModules = new Set();
   return {
     name: "lumiana",
     enforce: "pre",
@@ -407,6 +635,7 @@ function lumiana(options = {}) {
           if (typeof m === "string" && m !== "*") customExcluded.push(m);
         }
       }
+
       let isVite8OrAbove = false;
       try {
         const req = createRequire(path.join(projectRoot, "dummy.js"));
@@ -424,19 +653,21 @@ function lumiana(options = {}) {
         }
       }
       const optimizeDepsConfig = {
-        exclude: [...nodeBuiltins, ...customExcluded]
+        exclude: Array.from(new Set([...nodeBuiltins, ...customExcluded]))
       };
       if (isVite8OrAbove) {
         optimizeDepsConfig.rolldownOptions = {
           plugins: [
             {
+              name: "lumiana-transform-require-builtins",
+              transform(code, id) {
+                return transformRequireBuiltins(code, id, options);
+              }
+            },
+            {
               name: "lumiana-externalize-node-builtins",
               resolveId(id) {
-                const clean = id.startsWith("node:") ? id.slice(5) : id;
-                if (id.startsWith("node:") || NODE_BUILTIN_LIST.includes(clean)) {
-                  return { id, external: true };
-                }
-                if (customExcluded.includes(id) || customExcluded.includes(clean)) {
+                if (isNodeTargetModule(id, options, projectRoot)) {
                   return { id, external: true };
                 }
               }
@@ -447,15 +678,27 @@ function lumiana(options = {}) {
         optimizeDepsConfig.esbuildOptions = {
           plugins: [
             {
+              name: "lumiana-transform-require-builtins",
+              setup(build) {
+                build.onLoad({ filter: /\.[cm]?[jt]sx?$/ }, async (args) => {
+                  try {
+                    const contents = await fs.promises.readFile(args.path, "utf-8");
+                    const res = transformRequireBuiltins(contents, args.path, options, projectRoot);
+                    if (res) {
+                      return {
+                        contents: res.code,
+                        loader: args.path.endsWith(".ts") || args.path.endsWith(".tsx") ? "ts" : "js"
+                      };
+                    }
+                  } catch {}
+                });
+              }
+            },
+            {
               name: "lumiana-externalize-node-builtins",
               setup(build) {
-                const filter = /^(node:)?[a-zA-Z0-9_\/]+$/;
-                build.onResolve({ filter }, (args) => {
-                  const clean = args.path.startsWith("node:") ? args.path.slice(5) : args.path;
-                  if (args.path.startsWith("node:") || NODE_BUILTIN_LIST.includes(clean)) {
-                    return { path: args.path, external: true };
-                  }
-                  if (customExcluded.includes(args.path) || customExcluded.includes(clean)) {
+                build.onResolve({ filter: /.*/ }, (args) => {
+                  if (isNodeTargetModule(args.path, options, projectRoot)) {
                     return { path: args.path, external: true };
                   }
                 });
@@ -468,11 +711,14 @@ function lumiana(options = {}) {
         optimizeDeps: optimizeDepsConfig,
         ...isBuild ? {
           build: {
-            outDir: path.join(baseOutDir, "client"),
+            outDir: baseOutDir,
             emptyOutDir: true
           }
         } : {}
       };
+    },
+    transform(code, id) {
+      return transformRequireBuiltins(code, id, options, projectRoot);
     },
     resolveId(id) {
       if (id === "virtual:lumiana" || id === "lumiana" || id === "lumiana/client") {
@@ -482,7 +728,10 @@ function lumiana(options = {}) {
         return;
       }
       const cleanId = id.startsWith("node:") ? id.slice(5) : id;
-      if (isNodeTargetModule(id, options)) {
+      if (isNodeTargetModule(id, options, projectRoot)) {
+        if (!NODE_BUILTIN_LIST.includes(cleanId)) {
+          usedNodeModules.add(cleanId);
+        }
         return `${NODE_BUILTIN_PREFIX}${cleanId}`;
       }
     },
@@ -523,6 +772,9 @@ function lumiana(options = {}) {
         if (modName === "string_decoder") {
           return IN_MEMORY_STRING_DECODER_CODE;
         }
+        if (modName === "perf_hooks") {
+          return IN_MEMORY_PERF_HOOKS_CODE;
+        }
         try {
           const realMod = await importProjectModule(modName, projectRoot);
           const targetMod = realMod && typeof realMod === "object" && "default" in realMod && Object.keys(realMod).length === 1 ? realMod.default : realMod;
@@ -539,12 +791,23 @@ function lumiana(options = {}) {
               const v = targetMod?.[nf] ?? realMod?.[nf];
               if (typeof v === "string" || typeof v === "number" || typeof v === "boolean") {
                 staticValues[nf] = v;
-              } else if (v && typeof v === "object" && !Array.isArray(v)) {
-                staticValues[nf] = { ...v };
+              } else if (Array.isArray(v)) {
+                staticValues[nf] = JSON.parse(JSON.stringify(v));
+              } else if (v && typeof v === "object") {
+                const proto = Object.getPrototypeOf(v);
+                if ((proto === Object.prototype || proto === null) && Object.keys(v).length > 0) {
+                  staticValues[nf] = JSON.parse(JSON.stringify(v));
+                }
               }
             } catch {
             }
           }
+          const exportLines = keys.map((k) => {
+            if (JS_RESERVED_WORDS.has(k)) {
+              return `const _exp_${k} = _mod[${JSON.stringify(k)}];\nexport { _exp_${k} as ${k} };`;
+            }
+            return `export const ${k} = _mod[${JSON.stringify(k)}];`;
+          }).join("\n");
           return `
 import { createNodeModuleProxy } from 'virtual:lumiana';
 
@@ -553,7 +816,7 @@ const _staticValues = ${JSON.stringify(staticValues)};
 const _mod = createNodeModuleProxy(_modName, [_modName], null, _staticValues);
 
 export default _mod;
-${keys.map((k) => `export const ${k} = _mod[${JSON.stringify(k)}];`).join("\n")}
+${exportLines}
 `;
         } catch {
           return `
@@ -597,8 +860,19 @@ export default _mod;
       const workerSrc = getWorkerPath();
       fs.mkdirSync(baseOutDir, { recursive: true });
       if (fs.existsSync(workerSrc)) {
-        fs.copyFileSync(workerSrc, path.join(baseOutDir, 'worker.js'));
+        fs.copyFileSync(workerSrc, path.join(baseOutDir, 'worker.mjs'));
       }
+      for (const legacy of ['worker.js', 'main.js']) {
+        const p = path.join(baseOutDir, legacy);
+        if (fs.existsSync(p)) {
+          try { fs.unlinkSync(p); } catch {}
+        }
+      }
+      const legacyClient = path.join(baseOutDir, 'client');
+      if (fs.existsSync(legacyClient)) {
+        try { fs.rmSync(legacyClient, { recursive: true, force: true }); } catch {}
+      }
+
       const mainJsContent = `import http from 'node:http';
 import fs from 'node:fs';
 import path from 'node:path';
@@ -607,10 +881,10 @@ import { fileURLToPath } from 'node:url';
 import { Worker } from 'node:worker_threads';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
-const clientDir = path.join(__dirname, 'client');
-const workerPath = path.resolve(__dirname, 'worker.js');
+const clientDir = __dirname;
+const workerPath = path.resolve(__dirname, 'worker.mjs');
 
-const PORT = ${PORT};
+const PORT = process.env.PORT ? parseInt(process.env.PORT, 10) : ${PORT};
 const WS_PATH = '${WS_PATH}';
 const USERNAME = ${JSON.stringify(username)};
 const PASSWORD = ${JSON.stringify(password)};
@@ -792,6 +1066,10 @@ const server = http.createServer(async (req, res) => {
 
   // Static file serving
   let filePath = path.join(clientDir, req.url === '/' ? 'index.html' : req.url.split('?')[0]);
+  const baseName = path.basename(filePath);
+  if (baseName === 'main.mjs' || baseName === 'worker.mjs' || baseName === 'package.json') {
+    filePath = path.join(clientDir, 'index.html');
+  }
   if (!fs.existsSync(filePath) || fs.statSync(filePath).isDirectory()) {
     filePath = path.join(clientDir, 'index.html');
   }
@@ -839,15 +1117,39 @@ server.on('upgrade', (req, socket) => {
   activeWorkers.add(worker);
   latestActiveWorker = worker;
 
+  function sendFatalErrorOverSocket(err) {
+    if (socket.writable) {
+      try {
+        const errorInfo = {
+          message: err?.message || String(err),
+          stack: err?.stack || '',
+          code: err?.code,
+          errno: err?.errno,
+          syscall: err?.syscall,
+          path: err?.path,
+          spawnargs: err?.spawnargs,
+        };
+        const payload = JSON.stringify(errorInfo);
+        const packet = Buffer.concat([Buffer.from([0x0C]), Buffer.from(payload, 'utf-8')]);
+        socket.write(encodeBinaryFrame(packet));
+      } catch {}
+    }
+  }
+
   worker.on('message', (msg) => {
     if (msg?.type === 'WS_SEND') {
-      const data = Buffer.isBuffer(msg.data) ? msg.data : Buffer.from(msg.data);
-      socket.write(encodeBinaryFrame(data));
+      try {
+        if (socket.writable) {
+          const data = Buffer.isBuffer(msg.data) ? msg.data : Buffer.from(msg.data);
+          socket.write(encodeBinaryFrame(data));
+        }
+      } catch {}
     }
   });
 
   worker.on('error', (err) => {
     console.error('[Lumiana Worker Error]', err);
+    sendFatalErrorOverSocket(err);
   });
 
   worker.on('exit', (code) => {
@@ -857,6 +1159,7 @@ server.on('upgrade', (req, socket) => {
     }
     if (code !== 0 && code !== 1 && code !== null) {
       console.error('[Lumiana Worker Exit] Worker stopped with exit code ' + code);
+      sendFatalErrorOverSocket(new Error('Worker thread stopped unexpectedly with exit code ' + code));
     }
   });
 
@@ -906,8 +1209,72 @@ server.listen(PORT, () => {
   console.log('\\u26A1 Lumiana Authenticated Binary WebSocket Server running at ws://localhost:' + PORT + WS_PATH);
 });
 `;
-      fs.writeFileSync(path.join(baseOutDir, 'main.js'), mainJsContent, 'utf-8');
-      console.log('\u26A1 [Lumiana] Built standalone authenticated binary websocket server: dist/main.js');
+      fs.writeFileSync(path.join(baseOutDir, 'main.mjs'), mainJsContent, 'utf-8');
+      console.log('\u26A1 [Lumiana] Built standalone authenticated binary websocket server: dist/main.mjs');
+
+      // Generate production package.json with excluded dependencies
+      let rootPkg: any = {};
+      try {
+        const rootPkgPath = path.join(projectRoot, 'package.json');
+        if (fs.existsSync(rootPkgPath)) {
+          rootPkg = JSON.parse(fs.readFileSync(rootPkgPath, 'utf-8'));
+        }
+      } catch {}
+
+      const prodDeps: Record<string, string> = {};
+      if (options.nodeModules) {
+        for (const m of options.nodeModules) {
+          if (typeof m === 'string' && !m.includes('*')) {
+            usedNodeModules.add(m);
+          }
+        }
+      }
+
+      for (const mod of usedNodeModules) {
+        let pkgName = mod;
+        if (mod.startsWith('@')) {
+          const parts = mod.split('/');
+          pkgName = parts.slice(0, 2).join('/');
+        } else {
+          pkgName = mod.split('/')[0];
+        }
+        if (NODE_BUILTIN_LIST.includes(pkgName)) continue;
+
+        if (rootPkg.dependencies?.[pkgName]) {
+          prodDeps[pkgName] = rootPkg.dependencies[pkgName];
+        } else if (rootPkg.devDependencies?.[pkgName]) {
+          prodDeps[pkgName] = rootPkg.devDependencies[pkgName];
+        } else {
+          try {
+            const depPkgPath = path.join(projectRoot, 'node_modules', pkgName, 'package.json');
+            if (fs.existsSync(depPkgPath)) {
+              const depPkg = JSON.parse(fs.readFileSync(depPkgPath, 'utf-8'));
+              prodDeps[pkgName] = `^${depPkg.version}`;
+            } else {
+              prodDeps[pkgName] = '*';
+            }
+          } catch {
+            prodDeps[pkgName] = '*';
+          }
+        }
+      }
+
+      const distPkg = {
+        name: rootPkg.name || 'lumiana-app',
+        version: rootPkg.version || '0.0.0',
+        type: 'module',
+        scripts: {
+          start: 'node main.mjs'
+        },
+        dependencies: prodDeps
+      };
+
+      fs.writeFileSync(
+        path.join(baseOutDir, 'package.json'),
+        JSON.stringify(distPkg, null, 2) + '\n',
+        'utf-8'
+      );
+      console.log('\u26A1 [Lumiana] Generated production package.json in ' + path.join(baseOutDir, 'package.json'));
     }
   };
 }

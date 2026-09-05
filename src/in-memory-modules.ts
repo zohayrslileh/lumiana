@@ -263,184 +263,208 @@ export default _path;
 `;
 
 export const IN_MEMORY_EVENTS_CODE = `
-export class EventEmitter {
-  static defaultMaxListeners = 10;
-  static EventEmitter = EventEmitter;
-
-  constructor() {
+export function EventEmitter() {
+  if (this._events === undefined || this._events === Object.getPrototypeOf(this)?._events) {
     this._events = Object.create(null);
-    this._maxListeners = undefined;
+    this._eventsCount = 0;
+  }
+  this._maxListeners = this._maxListeners || undefined;
+}
+
+EventEmitter.EventEmitter = EventEmitter;
+EventEmitter.default = EventEmitter;
+EventEmitter.defaultMaxListeners = 10;
+
+EventEmitter.init = function() {
+  if (this._events === undefined || this._events === Object.getPrototypeOf(this)?._events) {
+    this._events = Object.create(null);
+    this._eventsCount = 0;
+  }
+  this._maxListeners = this._maxListeners || undefined;
+};
+
+EventEmitter.listenerCount = (emitter, type) => (emitter && typeof emitter.listenerCount === 'function' ? emitter.listenerCount(type) : 0);
+
+EventEmitter.prototype.setMaxListeners = function(n) {
+  if (typeof n !== 'number' || n < 0 || Number.isNaN(n)) {
+    throw new RangeError('The value of "n" is out of range. It must be a non-negative number.');
+  }
+  this._maxListeners = n;
+  return this;
+};
+
+EventEmitter.prototype.getMaxListeners = function() {
+  return this._maxListeners !== undefined ? this._maxListeners : EventEmitter.defaultMaxListeners;
+};
+
+EventEmitter.prototype.emit = function(type, ...args) {
+  let doError = type === 'error';
+  const events = this._events;
+  if (events !== undefined) {
+    doError = doError && events.error === undefined;
+  } else if (!doError) {
+    return false;
   }
 
-  setMaxListeners(n) {
-    if (typeof n !== 'number' || n < 0 || Number.isNaN(n)) {
-      throw new RangeError('The value of "n" is out of range. It must be a non-negative number.');
+  if (doError) {
+    let er;
+    if (args.length > 0) er = args[0];
+    if (er instanceof Error) {
+      throw er;
     }
-    this._maxListeners = n;
-    return this;
+    const err = new Error('Unhandled error.' + (er ? ' (' + er.message + ')' : ''));
+    err.context = er;
+    throw err;
   }
 
-  getMaxListeners() {
-    return this._maxListeners !== undefined ? this._maxListeners : EventEmitter.defaultMaxListeners;
-  }
+  if (!events) return false;
+  const handler = events[type];
+  if (handler === undefined) return false;
 
-  emit(type, ...args) {
-    let doError = type === 'error';
-    const events = this._events;
-    if (events !== undefined) {
-      doError = doError && events.error === undefined;
-    } else if (!doError) {
-      return false;
-    }
-
-    if (doError) {
-      let er;
-      if (args.length > 0) er = args[0];
-      if (er instanceof Error) {
-        throw er;
-      }
-      const err = new Error('Unhandled error.' + (er ? ' (' + er.message + ')' : ''));
-      err.context = er;
-      throw err;
-    }
-
-    const handler = events[type];
-    if (handler === undefined) return false;
-
-    if (typeof handler === 'function') {
-      Reflect.apply(handler, this, args);
-      return true;
-    }
-
-    const len = handler.length;
-    const listeners = handler.slice();
-    for (let i = 0; i < len; ++i) {
-      Reflect.apply(listeners[i], this, args);
-    }
+  if (typeof handler === 'function') {
+    Reflect.apply(handler, this, args);
     return true;
   }
 
-  addListener(type, listener) {
-    return this._addListener(type, listener, false);
+  const len = handler.length;
+  const listeners = handler.slice();
+  for (let i = 0; i < len; ++i) {
+    Reflect.apply(listeners[i], this, args);
   }
+  return true;
+};
 
-  on(type, listener) {
-    return this._addListener(type, listener, false);
-  }
+EventEmitter.prototype.addListener = function(type, listener) {
+  return this._addListener(type, listener, false);
+};
 
-  prependListener(type, listener) {
-    return this._addListener(type, listener, true);
-  }
+EventEmitter.prototype.on = function(type, listener) {
+  return this._addListener(type, listener, false);
+};
 
-  once(type, listener) {
-    if (typeof listener !== 'function') throw new TypeError('The "listener" argument must be of type Function.');
-    let fired = false;
-    const onceWrapper = (...args) => {
-      this.removeListener(type, onceWrapper);
-      if (!fired) {
-        fired = true;
-        Reflect.apply(listener, this, args);
-      }
-    };
-    onceWrapper.listener = listener;
-    return this.on(type, onceWrapper);
-  }
+EventEmitter.prototype.prependListener = function(type, listener) {
+  return this._addListener(type, listener, true);
+};
 
-  prependOnceListener(type, listener) {
-    if (typeof listener !== 'function') throw new TypeError('The "listener" argument must be of type Function.');
-    let fired = false;
-    const onceWrapper = (...args) => {
-      this.removeListener(type, onceWrapper);
-      if (!fired) {
-        fired = true;
-        Reflect.apply(listener, this, args);
-      }
-    };
-    onceWrapper.listener = listener;
-    return this.prependListener(type, onceWrapper);
-  }
-
-  removeListener(type, listener) {
-    if (typeof listener !== 'function') throw new TypeError('The "listener" argument must be of type Function.');
-    const list = this._events[type];
-    if (list === undefined) return this;
-
-    if (list === listener || list.listener === listener) {
-      delete this._events[type];
-      if (this._events.removeListener) {
-        this.emit('removeListener', type, listener);
-      }
-    } else if (Array.isArray(list)) {
-      let position = -1;
-      for (let i = list.length - 1; i >= 0; i--) {
-        if (list[i] === listener || list[i].listener === listener) {
-          position = i;
-          break;
-        }
-      }
-      if (position < 0) return this;
-      list.splice(position, 1);
-      if (list.length === 1) this._events[type] = list[0];
-      if (this._events.removeListener) {
-        this.emit('removeListener', type, listener);
-      }
+EventEmitter.prototype.once = function(type, listener) {
+  if (typeof listener !== 'function') throw new TypeError('The "listener" argument must be of type Function.');
+  let fired = false;
+  const onceWrapper = (...args) => {
+    this.removeListener(type, onceWrapper);
+    if (!fired) {
+      fired = true;
+      Reflect.apply(listener, this, args);
     }
-    return this;
-  }
+  };
+  onceWrapper.listener = listener;
+  return this.on(type, onceWrapper);
+};
 
-  off(type, listener) {
-    return this.removeListener(type, listener);
-  }
-
-  removeAllListeners(type) {
-    if (type === undefined) {
-      this._events = Object.create(null);
-      return this;
+EventEmitter.prototype.prependOnceListener = function(type, listener) {
+  if (typeof listener !== 'function') throw new TypeError('The "listener" argument must be of type Function.');
+  let fired = false;
+  const onceWrapper = (...args) => {
+    this.removeListener(type, onceWrapper);
+    if (!fired) {
+      fired = true;
+      Reflect.apply(listener, this, args);
     }
+  };
+  onceWrapper.listener = listener;
+  return this.prependListener(type, onceWrapper);
+};
+
+EventEmitter.prototype.removeListener = function(type, listener) {
+  if (typeof listener !== 'function') throw new TypeError('The "listener" argument must be of type Function.');
+  if (!this._events) return this;
+  const list = this._events[type];
+  if (list === undefined) return this;
+
+  if (list === listener || list.listener === listener) {
     delete this._events[type];
-    return this;
-  }
-
-  listeners(type) {
-    const list = this._events[type];
-    if (!list) return [];
-    return Array.isArray(list) ? list.map(l => l.listener || l) : [list.listener || list];
-  }
-
-  rawListeners(type) {
-    const list = this._events[type];
-    if (!list) return [];
-    return Array.isArray(list) ? list.slice() : [list];
-  }
-
-  listenerCount(type) {
-    const list = this._events[type];
-    if (!list) return 0;
-    return Array.isArray(list) ? list.length : 1;
-  }
-
-  eventNames() {
-    return Object.keys(this._events);
-  }
-
-  _addListener(type, listener, prepend) {
-    if (typeof listener !== 'function') throw new TypeError('The "listener" argument must be of type Function.');
-    if (this._events[type] === undefined) {
-      this._events[type] = listener;
-    } else if (typeof this._events[type] === 'function') {
-      this._events[type] = prepend ? [listener, this._events[type]] : [this._events[type], listener];
-    } else {
-      if (prepend) {
-        this._events[type].unshift(listener);
-      } else {
-        this._events[type].push(listener);
+    if (this._events.removeListener) {
+      this.emit('removeListener', type, listener);
+    }
+  } else if (Array.isArray(list)) {
+    let position = -1;
+    for (let i = list.length - 1; i >= 0; i--) {
+      if (list[i] === listener || list[i].listener === listener) {
+        position = i;
+        break;
       }
     }
+    if (position < 0) return this;
+    list.splice(position, 1);
+    if (list.length === 1) this._events[type] = list[0];
+    if (this._events.removeListener) {
+      this.emit('removeListener', type, listener);
+    }
+  }
+  return this;
+};
+
+EventEmitter.prototype.off = function(type, listener) {
+  return this.removeListener(type, listener);
+};
+
+EventEmitter.prototype.removeAllListeners = function(type) {
+  if (!this._events) {
+    this._events = Object.create(null);
     return this;
   }
-}
+  if (type === undefined) {
+    this._events = Object.create(null);
+    return this;
+  }
+  delete this._events[type];
+  return this;
+};
 
-EventEmitter.listenerCount = (emitter, type) => (emitter && typeof emitter.listenerCount === 'function' ? emitter.listenerCount(type) : 0);
+EventEmitter.prototype.listeners = function(type) {
+  if (!this._events) return [];
+  const list = this._events[type];
+  if (!list) return [];
+  return Array.isArray(list) ? list.map(l => l.listener || l) : [list.listener || list];
+};
+
+EventEmitter.prototype.rawListeners = function(type) {
+  if (!this._events) return [];
+  const list = this._events[type];
+  if (!list) return [];
+  return Array.isArray(list) ? list.slice() : [list];
+};
+
+EventEmitter.prototype.listenerCount = function(type) {
+  if (!this._events) return 0;
+  const list = this._events[type];
+  if (!list) return 0;
+  return Array.isArray(list) ? list.length : 1;
+};
+
+EventEmitter.prototype.eventNames = function() {
+  if (!this._events) return [];
+  return Object.keys(this._events);
+};
+
+EventEmitter.prototype._addListener = function(type, listener, prepend) {
+  if (typeof listener !== 'function') throw new TypeError('The "listener" argument must be of type Function.');
+  if (!this._events) {
+    this._events = Object.create(null);
+  }
+  if (this._events[type] === undefined) {
+    this._events[type] = listener;
+  } else if (typeof this._events[type] === 'function') {
+    this._events[type] = prepend ? [listener, this._events[type]] : [this._events[type], listener];
+  } else {
+    if (prepend) {
+      this._events[type].unshift(listener);
+    } else {
+      this._events[type].push(listener);
+    }
+  }
+  return this;
+};
+
 export default EventEmitter;
 `;
 
@@ -740,3 +764,12 @@ export class StringDecoder {
 }
 export default { StringDecoder };
 `;
+
+export const IN_MEMORY_PERF_HOOKS_CODE = `
+const _perf = typeof globalThis !== 'undefined' && globalThis.performance ? globalThis.performance : { now: () => Date.now() };
+export const performance = _perf;
+export const PerformanceObserver = typeof globalThis !== 'undefined' && globalThis.PerformanceObserver ? globalThis.PerformanceObserver : class {};
+export const PerformanceEntry = typeof globalThis !== 'undefined' && globalThis.PerformanceEntry ? globalThis.PerformanceEntry : class {};
+export default { performance: _perf, PerformanceObserver, PerformanceEntry };
+`;
+
