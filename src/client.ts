@@ -338,16 +338,17 @@ export function nativeModule<T = any>(
   specifier: string,
   mode?: 'default' | 'namespace',
   origin?: string,
+  path: string[] = [],
 ): T {
-  return connection().refs.invoke('module', specifier, mode, origin);
+  return connection().refs.invokePath('module', [specifier, mode, origin], path);
 }
 /** @internal Native dynamic import emitted by Vite. */
 export function importNode(specifier: string, origin?: string): Promise<any> {
   return connection().refs.invokeAsync('module', specifier, 'namespace', origin);
 }
 /** @internal Scope-aware transforms call this without replacing browser globals. */
-export function nativeGlobal(name: string): any {
-  return connection().refs.invoke('global', name);
+export function nativeGlobal(name: string, ...path: string[]): any {
+  return connection().refs.invokePath('global', [name], path);
 }
 /** @internal Hybrid invocation emitted for unbound fetch. */
 export function hybridFetch(input: RequestInfo | URL, init?: RequestInit): Promise<Response> {

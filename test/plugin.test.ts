@@ -4,7 +4,16 @@ import fs from 'node:fs/promises';
 import path from 'node:path';
 import { build } from 'vite';
 import { lumiana } from '../dist/index.js';
-test('Vite builds browser packages and deploys only proven or explicit native dependencies', async () => {
+test('Vite builds browser packages and deploys only proven or explicit native dependencies', async (t) => {
+  const previous = [process.env.LUMIANA_USERNAME, process.env.LUMIANA_PASSWORD];
+  t.after(() => {
+    for (const [i, key] of ['LUMIANA_USERNAME', 'LUMIANA_PASSWORD'].entries()) {
+      if (previous[i] === undefined) delete process.env[key];
+      else process.env[key] = previous[i];
+    }
+  });
+  process.env.LUMIANA_USERNAME = 'build-environment-user';
+  process.env.LUMIANA_PASSWORD = 'build-environment-password';
   const root = await fs.mkdtemp(path.join(process.cwd(), 'node_modules/.lumiana-build-'));
   const pkg = async (name: string, files: Record<string, string>, extra = {}) => {
     const dir = path.join(root, 'node_modules', name);
@@ -26,7 +35,9 @@ test('Vite builds browser packages and deploys only proven or explicit native de
       },
       { type: 'module' },
     );
-    await pkg('browser-cjs', { 'index.js': "module.exports=()=> 'cjs-proof';" });
+    await pkg('browser-cjs', {
+      'index.js': "module.exports=(value={deep:{value:'cjs-proof'}})=>value.deep.value;",
+    });
     await pkg(
       'conditional',
       {

@@ -105,11 +105,11 @@ function handle(message: any): void {
     if (mode === 'namespace' || mode === 'default') {
       const from = origin ? pathToFileURL(path.resolve(workerData.root, origin)).href : parentURL;
       const key = from + '\0' + specifier + '\0' + mode;
-      if (modules.has(key)) {
-        finish(true, refs.encode(modules.get(key), true));
-        return;
-      }
       try {
+        if (modules.has(key)) {
+          finish(true, refs.encodeResult(modules.get(key), message.invocation.path, true));
+          return;
+        }
         const resolved = resolveImport(specifier, from);
         if (message.sync) {
           const loaded = require(resolved.startsWith('file:') ? fileURLToPath(resolved) : resolved);
@@ -121,7 +121,7 @@ function handle(message: any): void {
             : Object.assign(Object.create(null), loaded, { default: loaded });
           const value = mode === 'default' ? namespace.default : namespace;
           modules.set(key, value);
-          finish(true, refs.encode(value, true));
+          finish(true, refs.encodeResult(value, message.invocation.path, true));
           return;
         }
         void import(resolved)
@@ -130,7 +130,7 @@ function handle(message: any): void {
               throw new SyntaxError(`Module ${specifier} has no default export`);
             const value = mode === 'default' ? namespace.default : namespace;
             modules.set(key, value);
-            finish(true, refs.encode(value, true));
+            finish(true, refs.encodeResult(value, message.invocation.path, true));
           })
           .catch((error) => finish(false, error));
       } catch (error) {

@@ -2,6 +2,23 @@
 
 Use Node.js 22.18+ on the 22.x line, or Node.js 24.11+. It connects a Vite application to a Node.js Worker through native handler references. Application code keeps normal imports, synchronous methods, constructors, property access, and callbacks. Browser code can use the DOM alongside those references.
 
+This repository uses Bun for package management and Node.js for execution:
+
+```sh
+bun install
+bun run build
+bun run test
+```
+
+To run the example after building the library, register the checkout with [bun link](https://bun.sh/docs/pm/cli/link):
+
+```sh
+bun link
+cd example
+bun install
+bun run dev
+```
+
 ```ts
 // vite.config.ts
 import { defineConfig } from 'vite';
@@ -57,7 +74,7 @@ const fs = node<typeof import('node:fs')>('node:fs');
 const exists = fs.existsSync(tmpdir()); // boolean, synchronously
 ```
 
-`url` selects the host's HTTP(S) origin; otherwise the page's origin is used. The plugin respects Vite's base path. Credentials default to `lumiana` / `lumiana` and can be set through the plugin's `defaultCredentials` option or `LUMIANA_USERNAME` / `LUMIANA_PASSWORD`.
+`url` selects the host's HTTP(S) origin; otherwise the page's origin is used. The plugin respects Vite's base path. `LUMIANA_USERNAME` and `LUMIANA_PASSWORD` override the plugin's `defaultCredentials` in development, preview, and standalone production. Unspecified credentials fall back to `lumiana` / `lumiana`.
 
 ```ts
 lumiana({
@@ -77,12 +94,14 @@ Primitives and plain records cross by value, including cyclic records. Functions
 
 Synchronous operations use synchronous XHR. The request is MessagePack binary; the response is MessagePack encoded as Base64 text, with gzip for larger responses. The browser decompresses it before decoding. Asynchronous traffic uses binary MessagePack WebSocket messages. Native callbacks can reenter browser code, including nested synchronous calls back to native handlers. Native queued work is held until the caller finishes its synchronous turn, so registering a listener immediately after creating a native resource is ordered correctly.
 
+Consecutive property reads are combined when they can execute on the same owner. For example, `process.env.HOME` takes one synchronous request. This also applies to other globals, module references, and references passed into ordinary functions. Reads remain live; values are not cached. Evaluation continues locally at copied values, and computed expressions, method receivers, and assignment targets keep their original evaluation order.
+
 Each connection owns one Worker. Closing the connection stops the Worker; Worker exit or failure closes the connection and rejects pending work. Credentials are checked at initial establishment. Subsequent messages route to that connection's Worker without module allowlists or per-operation permission checks. Worker console output, standard output/error, and uncaught errors are projected into the browser.
 
 Run `vite build` followed by `vite preview` to try the built application locally, including its native Node.js handlers. Preview uses the plugin's credentials and respects Vite's base path and preview options.
 
-`vite build` creates `dist/public`, the shared host and Worker runtime in `dist/server`, a deployment `package.json`, and `dist/main.mjs`. For standalone deployment, install the generated dependencies and run `npm start` in `dist`. `PORT` and `HOST` configure the standalone listener. Vite controls application minification through its normal `build.minify` option.
+`vite build` creates `dist/public`, the shared host and Worker runtime in `dist/server`, a deployment `package.json`, and `dist/main.mjs`. For standalone deployment, run `bun install --production` and `bun run start` in `dist`. `LUMIANA_PORT` and `LUMIANA_HOST` configure the standalone listener (defaults: `3883` and `127.0.0.1`). Vite dev and preview use Vite's port and host options. Vite controls application minification through its normal `build.minify` option.
 
 A remote reference remains a JavaScript proxy. Owner methods and constructors preserve native receivers, but a browser intrinsic that directly inspects private engine state—such as `Map.prototype.get.call(remoteMap)`—cannot acquire another process's internal slots. Use `remoteMap.get(key)` to invoke its native handler. Synchronous module loading also retains Node's restriction on modules with top-level asynchronous initialization; use asynchronous `import()` for those modules. Lumiana does not claim to erase these engine constraints or network latency.
 
-Run `npm run typecheck` and `npm test` for the automated suite. The original mixed Node/DOM watcher lives in `example`. Independent browser checks run with `npm exec vite -- --config test/browser/vite.config.ts` and report their result on the page.
+Run `bun run typecheck` and `bun run test` for the automated suite. The original mixed Node/DOM watcher lives in `example`. Independent browser checks run with `bunx vite --config test/browser/vite.config.ts` and report their result on the page. The playground has its own dependencies; run `bun install` inside `playground` before using its scripts.

@@ -173,20 +173,72 @@ export class Bundling {
 export interface TransformOptions {
   place(id: string): Promise<Placement>;
   client?: string;
+  access?: string;
   nativeUsage?(id?: string): void;
   origin?: string;
   nativeOrigin?(specifier: string): void;
   names?(id: string): Promise<string[]>;
 }
+function staticKey(node: any): string | undefined {
+  if (node.type !== 'MemberExpression') return;
+  if (!node.computed && node.property.type === 'Identifier') return node.property.name;
+  if (node.computed && ['StringLiteral', 'NumericLiteral'].includes(node.property.type))
+    return String(node.property.value);
+}
+/** A call's receiver and an assignment's target must remain member expressions. */
+function valueRead(p: any): boolean {
+  for (;;) {
+    const parent = p.parentPath;
+    if (!parent) return true;
+    const n = parent.node;
+    if (
+      [
+        'TSAsExpression',
+        'TSTypeAssertion',
+        'TSNonNullExpression',
+        'TSSatisfiesExpression',
+        'ParenthesizedExpression',
+      ].includes(n.type)
+    ) {
+      p = parent;
+      continue;
+    }
+    if (
+      (['CallExpression', 'OptionalCallExpression'].includes(n.type) && p.key === 'callee') ||
+      (n.type === 'TaggedTemplateExpression' && p.key === 'tag') ||
+      (n.type === 'UnaryExpression' && n.operator === 'delete') ||
+      n.type === 'UpdateExpression' ||
+      (['AssignmentExpression', 'ForInStatement', 'ForOfStatement'].includes(n.type) &&
+        p.key === 'left')
+    )
+      return false;
+    if (
+      (n.type === 'ObjectProperty' &&
+        parent.parent.type === 'ObjectPattern' &&
+        p.key === 'value') ||
+      ['ObjectPattern', 'ArrayPattern', 'RestElement'].includes(n.type) ||
+      (n.type === 'AssignmentPattern' && p.key === 'left')
+    ) {
+      p = parent;
+      continue;
+    }
+    return true;
+  }
+}
+function extendRead(p: any): { end: any; keys: string[] } {
+  const keys: string[] = [];
+  let end = p;
+  while (end.parentPath?.node.object === end.node && valueRead(end.parentPath)) {
+    const key = staticKey(end.parentPath.node);
+    if (key === undefined) break;
+    keys.push(key);
+    end = end.parentPath;
+  }
+  return { end, keys };
+}
 /** Transform syntax and lexical bindings, never strings or shadowed identifiers. */
 export async function transformSource(source: string, id: string, options: TransformOptions) {
-  if (
-    !/\.[cm]?[jt]sx?(?:\?|$)/.test(id) ||
-    !/\b(?:import|require|fetch|WebSocket|Buffer|process|global|setImmediate|clearImmediate)\b/.test(
-      source,
-    )
-  )
-    return null;
+  if (!/\.[cm]?[jt]sx?(?:\?|$)/.test(id)) return null;
   let ast: ReturnType<typeof parseCode>;
   try {
     ast = parseCode(source);
@@ -196,7 +248,8 @@ export async function transformSource(source: string, id: string, options: Trans
   const edits = new MagicString(source),
     imports: string[] = [];
   const moduleNodes: any[] = [],
-    globals: any[] = [];
+    globals: any[] = [],
+    members: any[] = [];
   let counter = 0;
   const reserved = new Set<string>();
   traverse(ast as any, {
@@ -216,9 +269,19 @@ export async function transformSource(source: string, id: string, options: Trans
     nativeName = name(),
     fetchName = name(),
     socketName = name(),
-    bufferName = name();
+    bufferName = name(),
+    readName = name();
   const used = new Set<string>();
+  const esm = ast.program.body.some(
+    (node) => node.type.startsWith('Import') || node.type.startsWith('Export'),
+  );
+  let commonjs = false;
   traverse(ast as any, {
+    MemberExpression: {
+      exit(p: any) {
+        members.push(p);
+      },
+    },
     ImportDeclaration(p: any) {
       if (p.node.importKind !== 'type') moduleNodes.push(p);
     },
@@ -250,6 +313,12 @@ export async function transformSource(source: string, id: string, options: Trans
       if (p.node.source.type === 'StringLiteral') moduleNodes.push(p);
     },
     ReferencedIdentifier(p: any) {
+      if (
+        !esm &&
+        ['module', 'exports', 'require'].includes(p.node.name) &&
+        !p.scope.getBinding(p.node.name)
+      )
+        commonjs = true;
       if (
         !p.scope.getBinding(p.node.name) &&
         [
@@ -306,7 +375,15 @@ export async function transformSource(source: string, id: string, options: Trans
     } else if (n.type === 'ImportExpression') {
       used.add('importNode');
       replacement = `${importName}(${JSON.stringify(specifier)}${options.origin ? ',' + JSON.stringify(options.origin) : ''})`;
-    } else replacement = call();
+    } else {
+      const { end, keys } = extendRead(p);
+      replacement = keys.length
+        ? `${nodeName}(${JSON.stringify(specifier)},null,${JSON.stringify(options.origin ?? null)},${JSON.stringify(keys)})`
+        : call();
+      edits.overwrite(n.start, end.node.end, replacement);
+      removed.push([n.start, end.node.end]);
+      continue;
+    }
     edits.overwrite(n.start, n.end, replacement);
     removed.push([n.start, n.end]);
   }
@@ -325,11 +402,37 @@ export async function transformSource(source: string, id: string, options: Trans
       replacement = bufferName;
     } else {
       used.add('nativeGlobal');
-      replacement = `${nativeName}(${JSON.stringify(n.name)})`;
+      const { end, keys } = extendRead(p);
+      replacement = `${nativeName}(${[n.name, ...keys].map((key) => JSON.stringify(key)).join(',')})`;
+      if (keys.length) {
+        edits.overwrite(n.start, end.node.end, replacement);
+        removed.push([n.start, end.node.end]);
+        continue;
+      }
     }
     if (p.parent.type === 'ObjectProperty' && p.parent.shorthand && p.key === 'value')
       replacement = `${n.name}: ${replacement}`;
     edits.overwrite(n.start, n.end, replacement);
+  }
+  for (const p of members) {
+    if (!valueRead(p) || staticKey(p.node) === undefined) continue;
+    if (removed.some(([start, end]) => p.node.start >= start && p.node.end <= end)) continue;
+    if (extendRead(p).keys.length) continue;
+    const keys: string[] = [];
+    let root = p;
+    while (!removed.some(([start, end]) => root.node.start === start && root.node.end === end)) {
+      const key = staticKey(root.node);
+      if (key === undefined) break;
+      keys.unshift(key);
+      root = root.get('object');
+    }
+    if (keys.length < 2 || ['Super', 'MetaProperty'].includes(root.node.type)) continue;
+    used.add('readPath');
+    edits.overwrite(
+      p.node.start,
+      p.node.end,
+      `${readName}(${edits.slice(root.node.start, root.node.end)},${keys.map((key) => JSON.stringify(key)).join(',')})`,
+    );
   }
   if (!used.size) return null;
   const names: Record<string, string> = {
@@ -340,10 +443,20 @@ export async function transformSource(source: string, id: string, options: Trans
     HybridWebSocket: socketName,
     Buffer: bufferName,
   };
-  imports.push(
-    `import {${[...used].map((key) => `${key} as ${names[key]}`).join(',')}} from ${JSON.stringify(options.client ?? 'lumiana/client')};\n`,
-  );
-  edits.prepend(imports.join(''));
+  if (used.delete('readPath')) {
+    const access = JSON.stringify(options.access ?? 'lumiana/internal');
+    imports.push(
+      commonjs
+        ? `const {readPath:${readName}}=require(${access});\n`
+        : `import {readPath as ${readName}} from ${access};\n`,
+    );
+  }
+  if (used.size)
+    imports.push(
+      `import {${[...used].map((key) => `${key} as ${names[key]}`).join(',')}} from ${JSON.stringify(options.client ?? 'lumiana/client')};\n`,
+    );
+  const prologue = ast.program.directives.at(-1)?.end ?? ast.program.interpreter?.end ?? 0;
+  edits.appendLeft(prologue, (prologue ? '\n' : '') + imports.join(''));
   return {
     code: edits.toString(),
     map: edits.generateMap({ hires: true, source: id, includeContent: true }).toString(),

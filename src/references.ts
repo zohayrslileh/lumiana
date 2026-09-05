@@ -1,5 +1,6 @@
 import type { Graph, Invocation, Reference } from './protocol.js';
 import { decodeValue, encodeValue, type ValueReferences } from './values.js';
+import { readPath, registerReader } from './access.js';
 export interface ReferenceTransport {
   sync(invocation: Invocation): Graph;
   async(invocation: Invocation): Promise<Graph>;
@@ -68,11 +69,39 @@ export class References implements ValueReferences {
     return encodeValue(value, this, force);
   }
   decode(value: Graph): any {
-    return decodeValue(value, this);
+    return this.readPath(decodeValue(value, this), value.path ?? []);
+  }
+  /** Traverse owned references; copied values resume evaluation at the caller. */
+  encodeResult(value: any, path: string[] = [], force = false): Graph {
+    let graph = this.encode(value, force);
+    for (let i = 0; i < path.length; i++) {
+      const node =
+        typeof graph.root === 'object' && graph.root !== null
+          ? graph.nodes[graph.root.index]
+          : undefined;
+      if (node?.kind !== 'reference' || !['object', 'array', 'function'].includes(node.ref.kind))
+        return { ...graph, path: path.slice(i) };
+      const owner = this.original(node.ref.id);
+      graph = this.encode(Reflect.get(owner, path[i]!, owner));
+    }
+    return graph;
+  }
+  readPath(value: any, path: string[]): any {
+    this.assert();
+    return readPath(value, ...path);
   }
   invoke(operation: string, ...args: any[]): any {
+    return this.invokePath(operation, args, []);
+  }
+  invokePath(operation: string, args: any[], path: string[]): any {
     this.assert();
-    return this.decode(this.transport.sync({ operation, args: args.map((v) => this.encode(v)) }));
+    return this.decode(
+      this.transport.sync({
+        operation,
+        args: args.map((v) => this.encode(v)),
+        ...(path.length ? { path } : {}),
+      }),
+    );
   }
   async invokeAsync(operation: string, ...args: any[]): Promise<any> {
     this.assert();
@@ -107,7 +136,8 @@ export class References implements ValueReferences {
         result = Reflect.defineProperty(value, key, rest[0]);
         break;
       case 'prototype':
-        return this.encode(Reflect.getPrototypeOf(value), true);
+        result = Reflect.getPrototypeOf(value);
+        break;
       case 'setPrototype':
         result = Reflect.setPrototypeOf(value, key);
         break;
@@ -130,7 +160,11 @@ export class References implements ValueReferences {
         );
         break;
     }
-    return this.encode(result, input.operation === 'module' || input.operation === 'global');
+    return this.encodeResult(
+      result,
+      input.path,
+      ['module', 'global', 'prototype'].includes(input.operation),
+    );
   }
   import(ref: Reference): any {
     this.assert();
@@ -224,6 +258,7 @@ export class References implements ValueReferences {
     });
     this.imported.set(ref.id, proxy);
     this.remotes.set(proxy, ref.id);
+    registerReader(proxy, (path) => this.invokePath('get', [proxy, path[0], proxy], path.slice(1)));
     return proxy;
   }
 }

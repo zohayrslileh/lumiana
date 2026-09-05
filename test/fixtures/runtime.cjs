@@ -11,6 +11,12 @@ class Counter {
   }
 }
 exports.Counter = Counter;
+exports.readTree = () =>
+  new (class {
+    child = new (class {
+      value = 42;
+    })();
+  })();
 exports.identity = () => ({ threadId, count: ++count });
 exports.create = () => {
   const emitter = new EventEmitter();

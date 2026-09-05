@@ -20,10 +20,13 @@ export type ValueNode =
 export interface Graph {
   root: Atom;
   nodes: ValueNode[];
+  /** Reads to resume locally after reaching a value that crosses by copy. */
+  path?: string[];
 }
 export interface Invocation {
   operation: string;
   args: Graph[];
+  path?: string[];
 }
 export interface Failure {
   name: string;

@@ -2,6 +2,7 @@
   "name": "vite-project",
   "private": true,
   "version": "0.0.0",
+  "packageManager": "bun@1.3.14",
   "type": "module",
   "scripts": {
     "dev": "vite",
@@ -19,7 +20,7 @@
     "chokidar": "^5.0.0",
     "express": "^5.2.1",
     "hono": "^4.13.7",
-    "lumiana": "file:..",
+    "lumiana": "link:lumiana",
     "sharp": "^0.35.4",
     "systeminformation": "^5.33.8"
   }

@@ -25,9 +25,13 @@ export function lumiana(options: LumianaPluginOptions = {}): Plugin {
     bundling: Bundling,
     deploymentDir: string,
     failed = false;
+  const defaultCredentials = {
+    username: options.defaultCredentials?.username ?? 'lumiana',
+    password: options.defaultCredentials?.password ?? 'lumiana',
+  };
   const credentials = () => ({
-    username: options.defaultCredentials?.username ?? process.env.LUMIANA_USERNAME ?? 'lumiana',
-    password: options.defaultCredentials?.password ?? process.env.LUMIANA_PASSWORD ?? 'lumiana',
+    username: process.env.LUMIANA_USERNAME ?? defaultCredentials.username,
+    password: process.env.LUMIANA_PASSWORD ?? defaultCredentials.password,
   });
   const base = () => new URL(config.base || '/', 'http://lumiana.invalid/').pathname;
   const prefix = () => `${base()}__lumiana/`;
@@ -68,6 +72,7 @@ export function lumiana(options: LumianaPluginOptions = {}): Plugin {
                   {
                     name: 'lumiana-dependencies',
                     async resolveId(this: any, id: string, importer?: string) {
+                      if (id === 'lumiana/internal') return path.join(runtimeDir, 'access.js');
                       const local = localBuiltins[id.replace(/^node:/, '')];
                       if (local) return require.resolve(local);
                       if (id === 'lumiana/client') return { id, external: true };
@@ -103,6 +108,8 @@ export function lumiana(options: LumianaPluginOptions = {}): Plugin {
                     setup(build: import('esbuild').PluginBuild) {
                       build.onResolve({ filter: /.*/ }, async (args) => {
                         if (args.pluginData?.lumianaProbe) return;
+                        if (args.path === 'lumiana/internal')
+                          return { path: path.join(runtimeDir, 'access.js') };
                         const local = localBuiltins[args.path.replace(/^node:/, '')];
                         if (local) return { path: require.resolve(local) };
                         if (args.path === 'lumiana/client')
@@ -168,9 +175,11 @@ export function lumiana(options: LumianaPluginOptions = {}): Plugin {
           include: ['events/', 'buffer/'],
           ...optimizer,
         },
-        ...(env.command === 'build' || env.isPreview
-          ? { build: { outDir: path.join(deploymentDir, 'public') } }
-          : {}),
+        build: {
+          ...(env.command === 'build' || env.isPreview
+            ? { outDir: path.join(deploymentDir, 'public') }
+            : {}),
+        },
       } as UserConfig;
     },
     configResolved(resolved) {
@@ -179,6 +188,7 @@ export function lumiana(options: LumianaPluginOptions = {}): Plugin {
     },
     async resolveId(id, importer, resolveOptions) {
       if (id === 'lumiana/client') return clientId;
+      if (id === 'lumiana/internal') return path.join(runtimeDir, 'access.js');
       const local = localBuiltins[id.replace(/^node:/, '')];
       if (local) return this.resolve(local, importer, { ...resolveOptions, skipSelf: true });
       if (id === clientId) return id;
@@ -277,12 +287,18 @@ const server = await serve({
   base: ${JSON.stringify(base())},
   path: ${JSON.stringify(prefix())},
   mode: 'production',
-  username: process.env.LUMIANA_USERNAME ?? ${JSON.stringify(credentials().username)},
-  password: process.env.LUMIANA_PASSWORD ?? ${JSON.stringify(credentials().password)},
-  port: Number(process.env.PORT ?? 3883),
-  hostname: process.env.HOST ?? '127.0.0.1',
+  username: process.env.LUMIANA_USERNAME ?? ${JSON.stringify(defaultCredentials.username)},
+  password: process.env.LUMIANA_PASSWORD ?? ${JSON.stringify(defaultCredentials.password)},
+  port: Number(process.env.LUMIANA_PORT ?? 3883),
+  hostname: process.env.LUMIANA_HOST ?? '127.0.0.1',
 });
-console.log('Lumiana listening on', server.address());
+const address = server.address();
+const host = address.address === '0.0.0.0' ? '127.0.0.1'
+  : address.address === '::' ? '::1' : address.address;
+const hostname = host.includes(':') ? '[' + host + ']' : host;
+const url = new URL(${JSON.stringify(base())}, 'http://' + hostname + ':' + address.port);
+console.log('\\n  Lumiana ready (production)\\n');
+console.log('  URL: ' + url.href + '\\n');
 `,
       );
     },

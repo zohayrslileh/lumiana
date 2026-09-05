@@ -2,16 +2,85 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { References } from '../src/references.js';
 function pair() {
+  const requests: string[] = [];
   const a = new References({
-    sync: (input) => b.execute(input),
+    sync: (input) => {
+      requests.push(input.operation);
+      return b.execute(input);
+    },
     async: async (input) => b.execute(input),
   });
   const b = new References({
     sync: (input) => a.execute(input),
     async: async (input) => a.execute(input),
   });
-  return { a, b, remote: (value: any) => a.decode(b.encode(value)) };
+  return { a, b, requests, remote: (value: any) => a.decode(b.encode(value)) };
 }
+test('property paths coalesce native reads and preserve copy and ownership boundaries', () => {
+  const { a, b, requests, remote } = pair();
+  const trace: string[] = [];
+  class Leaf {
+    current = 42;
+    get value() {
+      trace.push('value');
+      return this.current;
+    }
+    get failure() {
+      throw new Error('getter failed');
+    }
+  }
+  class Root {
+    leaf = new Leaf();
+    get child() {
+      trace.push('child');
+      return this.leaf;
+    }
+    get record() {
+      return Object.defineProperty(
+        {
+          visible: 1,
+          get observed() {
+            trace.push('snapshot');
+            return 2;
+          },
+        },
+        'hidden',
+        { value: 3 },
+      );
+    }
+    text = 'hello';
+    empty = null;
+    browser: any;
+  }
+  const original = new Root();
+  const root = remote(original);
+  assert.equal(root.child.value, 42);
+  assert.equal(requests.length, 2);
+  requests.length = 0;
+  trace.length = 0;
+  assert.equal(a.readPath(root, ['child', 'value']), 42);
+  assert.deepEqual(requests, ['get']);
+  assert.deepEqual(trace, ['child', 'value']);
+  original.leaf.current = 43;
+  assert.equal(a.readPath(root, ['child', 'value']), 43);
+  assert.equal(a.readPath(root, ['child']), root.child);
+  assert.throws(() => a.readPath(root, ['child', 'failure', 'ignored']), /getter failed/);
+  assert.equal(a.readPath(root, ['record', 'hidden']), undefined);
+  assert.ok(trace.includes('snapshot'));
+  assert.equal(a.readPath(root, ['text', 'length']), 5);
+  assert.throws(() => a.readPath(root, ['empty', 'value']), TypeError);
+  class BrowserOwned {
+    get value() {
+      trace.push('browser');
+      return 7;
+    }
+  }
+  original.browser = b.decode(a.encode(new BrowserOwned()));
+  requests.length = 0;
+  assert.equal(a.readPath(root, ['browser', 'value']), 7);
+  assert.deepEqual(requests, ['get']);
+  assert.equal(trace.at(-1), 'browser');
+});
 test('plain graphs copy, native values retain identity and synchronous reflection', () => {
   const { a, b, remote } = pair();
   class Counter {

@@ -2,7 +2,9 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { fork, execFileSync } from 'node:child_process';
 import { once } from 'node:events';
+import { transformSource } from '../src/build.js';
 class XMLHttpRequest {
+  static requests = 0;
   status = 0;
   responseText = '';
   url = '';
@@ -14,6 +16,7 @@ class XMLHttpRequest {
     this.headers.push('-H', `${k}: ${v}`);
   }
   send(body: Uint8Array) {
+    XMLHttpRequest.requests++;
     const result = execFileSync(
       'curl',
       [
@@ -51,7 +54,19 @@ test('client contract through real HTTP, binary WebSocket and an isolated native
   const { lumiana, connect, node, hybridFetch, HybridWebSocket, importNode, nativeModule } =
     await import('../dist/client.js');
   const creds = { username: 'test', password: 'secret', url };
+  const compile = async (source: string) => {
+    const result = await transformSource(source, 'reader.js', {
+      place: async () => ({ native: true }),
+      client: new URL('../dist/client.js', import.meta.url).href,
+      access: new URL('../dist/access.js', import.meta.url).href,
+    });
+    return import(
+      'data:text/javascript;base64,' + Buffer.from(result?.code ?? source).toString('base64')
+    );
+  };
   try {
+    const reader = await compile('export const read = (value) => value.child.value;');
+    assert.equal(reader.read({ child: { value: 7 } }), 7);
     assert.throws(() => lumiana.status, /not connected/);
     assert.throws(() => node('node:fs'), /not connected/);
     await assert.rejects(
@@ -64,6 +79,21 @@ test('client contract through real HTTP, binary WebSocket and an isolated native
     assert.equal(await connect.credentials(creds), lumiana);
     await assert.rejects(connect.credentials({ ...creds, password: 'different' }), /different/);
     assert.equal((await lumiana.status()).pid, pid);
+    const beforeHome = XMLHttpRequest.requests;
+    assert.equal((await compile('export const value = process.env.HOME;')).value, process.env.HOME);
+    assert.equal(XMLHttpRequest.requests - beforeHome, 1, 'global property chain takes one XHR');
+    const beforeModule = XMLHttpRequest.requests;
+    const moduleRead = await compile("export const value = require('node:fs').constants.F_OK;");
+    assert.equal(moduleRead.value, 0);
+    assert.equal(XMLHttpRequest.requests - beforeModule, 1, 'module property chain takes one XHR');
+    const tree = node('./test/fixtures/runtime.cjs').readTree();
+    const beforeTree = XMLHttpRequest.requests;
+    assert.equal(reader.read(tree), 42);
+    assert.equal(
+      XMLHttpRequest.requests - beforeTree,
+      1,
+      'arbitrary reference chain takes one XHR',
+    );
     const asyncModule = await importNode('./test/fixtures/async.mjs');
     assert.equal(asyncModule.value, 42);
     const namespace = nativeModule('node:fs', 'namespace');
