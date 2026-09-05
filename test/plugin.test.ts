@@ -1,0 +1,82 @@
+import test from 'node:test';
+import assert from 'node:assert/strict';
+import fs from 'node:fs/promises';
+import path from 'node:path';
+import { build } from 'vite';
+import { lumiana } from '../dist/index.js';
+test('Vite builds browser packages and deploys only proven or explicit native dependencies', async () => {
+  const root = await fs.mkdtemp(path.join(process.cwd(), 'node_modules/.lumiana-build-'));
+  const pkg = async (name: string, files: Record<string, string>, extra = {}) => {
+    const dir = path.join(root, 'node_modules', name);
+    await fs.mkdir(dir, { recursive: true });
+    await fs.writeFile(
+      path.join(dir, 'package.json'),
+      JSON.stringify({ name, version: '1.0.0', main: 'index.js', ...extra }),
+    );
+    for (const [file, source] of Object.entries(files))
+      await fs.writeFile(path.join(dir, file), source);
+  };
+  try {
+    await fs.writeFile(path.join(root, 'package.json'), JSON.stringify({ type: 'module' }));
+    await pkg(
+      'portable',
+      {
+        'index.js':
+          "import {tmpdir} from 'node:os';export const value='bundled-proof';export {tmpdir};",
+      },
+      { type: 'module' },
+    );
+    await pkg('browser-cjs', { 'index.js': "module.exports=()=> 'cjs-proof';" });
+    await pkg(
+      'conditional',
+      {
+        'browser.js': "export default 'browser-condition-proof';",
+        'index.js': "module.exports=require('./binding.node');",
+        'binding.node': 'binary',
+      },
+      { exports: { browser: './browser.js', default: './index.js' } },
+    );
+    await pkg('native-addon', {
+      'index.js': "module.exports=require('./binding.node');",
+      'binding.node': 'binary native-proof',
+    });
+    await pkg('explicit', { 'index.js': "export default 'explicit-proof';" }, { type: 'module' });
+    await fs.writeFile(
+      path.join(root, 'index.html'),
+      '<script type="module" src="/main.js"></script>',
+    );
+    await fs.writeFile(
+      path.join(root, 'main.js'),
+      "import {connect} from 'lumiana/client';await connect.credentials({username:'lumiana',password:'lumiana'});await import('./entry.js');",
+    );
+    await fs.writeFile(
+      path.join(root, 'entry.js'),
+      "import {value,tmpdir} from 'portable';import cjs from 'browser-cjs';import condition from 'conditional';import addon from 'native-addon';import explicit from 'explicit';export * from 'node:os';document.body.textContent=[value,tmpdir(),cjs(),condition,addon,explicit].join(',');",
+    );
+    await build({
+      root,
+      configFile: false,
+      logLevel: 'silent',
+      plugins: [lumiana({ nodeModules: ['explicit'] })],
+      build: { minify: false, target: 'esnext' },
+    });
+    const assets = path.join(root, 'dist/public/assets');
+    const output = (
+      await Promise.all(
+        (await fs.readdir(assets)).map((f) => fs.readFile(path.join(assets, f), 'utf8')),
+      )
+    ).join('\n');
+    for (const text of ['bundled-proof', 'cjs-proof', 'browser-condition-proof'])
+      assert.ok(output.includes(text), text);
+    for (const text of ['binary native-proof', 'explicit-proof'])
+      assert.ok(!output.includes(text), text);
+    const manifest = JSON.parse(await fs.readFile(path.join(root, 'dist/package.json'), 'utf8'));
+    assert.equal(manifest.dependencies['native-addon'], '1.0.0');
+    assert.equal(manifest.dependencies.explicit, '1.0.0');
+    assert.equal(manifest.dependencies.portable, undefined);
+    assert.equal(manifest.dependencies.conditional, undefined);
+    assert.ok((await fs.stat(path.join(root, 'dist/server/worker.js'))).size > 0);
+  } finally {
+    await fs.rm(root, { recursive: true, force: true });
+  }
+});

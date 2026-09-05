@@ -6,7 +6,7 @@
   "scripts": {
     "dev": "vite",
     "build": "tsc && vite build",
-    "preview": "vite preview"
+    "preview": "node dist/main.mjs"
   },
   "devDependencies": {
     "@types/express": "^5.0.6",
@@ -19,7 +19,7 @@
     "chokidar": "^5.0.0",
     "express": "^5.2.1",
     "hono": "^4.13.7",
-    "lumiana": "^0.2.2",
+    "lumiana": "file:..",
     "systeminformation": "^5.33.8"
   }
 }

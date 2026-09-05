@@ -11,25 +11,25 @@
       <header>
         <div class="logo-container">
           <div class="logo-badge">⚡ LUMIANA</div>
-          <span class="tag">Internal Backend + Vite Binding</span>
+          <span class="tag">Native Node + Vite</span>
         </div>
         <h1>Lumiana Architecture Test</h1>
-        <p class="subtitle">Unified Backend Binding (Dev) & Inverted main.js Server (Prod)</p>
+        <p class="subtitle">One session runtime for development and production</p>
       </header>
 
       <main>
         <section class="card">
-          <h2>Server Ping Interface</h2>
-          <p>Test the unified <code>lumiana.ping()</code> interface connected to the internal backend.</p>
+          <h2>Server Status</h2>
+          <p>Read the main server status through <code>lumiana.status()</code>.</p>
           <div class="actions">
-            <button id="ping-btn" class="primary-btn">
-              <span>Ping Server</span>
+            <button id="status-btn" class="primary-btn">
+              <span>Refresh Status</span>
             </button>
           </div>
 
           <div class="result-box" id="result-box">
             <div class="status-indicator ready" id="status-indicator"></div>
-            <pre id="output">Click "Ping Server" to test the connection...</pre>
+            <pre id="output">Connecting…</pre>
           </div>
         </section>
 
