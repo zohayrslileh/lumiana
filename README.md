@@ -10,6 +10,8 @@ connection.
 This means a library can retain its normal JavaScript identity in the browser while its file
 handles, listening sockets, child processes, and native implementations remain on the server.
 
+![Lumiana execution architecture](./docs/lumiana-architecture.png)
+
 ## How execution is divided
 
 Lumiana divides behavior by capability rather than by package name:
