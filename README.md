@@ -103,7 +103,6 @@ Establishes the single Lumiana connection for the browser context and returns th
 const instance = await connect.credentials({
   username: 'lumiana',
   password: 'lumiana',
-  url: 'https://application.example', // optional
 });
 ```
 
@@ -112,8 +111,6 @@ const instance = await connect.credentials({
 - A concurrent connection attempt throws.
 - Attempting a different connection while one is active throws.
 - After disconnection, the same instance can connect again.
-
-When `url` is omitted, Lumiana connects through the page origin and respects Vite's base path.
 
 ### `await lumiana.status()`
 
