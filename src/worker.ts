@@ -31,6 +31,11 @@ function pump(until: () => boolean): void {
   }
 }
 const pending = new Map<number, { resolve: (v: Graph) => void; reject: (e: Error) => void }>();
+const requireModule = (specifier: string, origin?: string) => {
+  const from = origin ? pathToFileURL(path.resolve(workerData.root, origin)).href : parentURL;
+  const resolved = resolveImport(specifier, from);
+  return require(resolved.startsWith('file:') ? fileURLToPath(resolved) : resolved);
+};
 const refs = new References({
   sync(invocation) {
     const id = ++sequence;
@@ -56,6 +61,21 @@ const refs = new References({
       return loaded;
     }
     if (operation === 'global') return (globalThis as any)[args[0]];
+    if (operation === 'moduleBindings') {
+      const [specifier, origin, bindings] = args;
+      const loaded = requireModule(specifier, origin);
+      const isESM = Object.prototype.toString.call(loaded) === '[object Module]';
+      const namespace = isESM
+        ? loaded
+        : Object.assign(Object.create(null), loaded, { default: loaded });
+      return Object.fromEntries(
+        Object.values(bindings).map((exported: any, index: number) => {
+          if (exported !== '*' && isESM && !(exported in namespace))
+            throw new SyntaxError(`Module ${specifier} has no ${exported} export`);
+          return [index, exported === '*' ? namespace : namespace[exported]];
+        }),
+      );
+    }
     if (operation === 'evaluate')
       return evaluateExpression(args[0], (name) => (globalThis as any)[name]);
     throw new TypeError(`Unknown operation ${operation}`);

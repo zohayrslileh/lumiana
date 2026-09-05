@@ -2,9 +2,12 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { fork, execFileSync } from 'node:child_process';
 import { once } from 'node:events';
+import { createServer } from 'node:net';
+import { decode } from '@msgpack/msgpack';
 import { transformSource } from '../src/build.js';
 class XMLHttpRequest {
   static requests = 0;
+  static operations: string[] = [];
   status = 0;
   responseText = '';
   url = '';
@@ -17,6 +20,8 @@ class XMLHttpRequest {
   }
   send(body: Uint8Array) {
     XMLHttpRequest.requests++;
+    const packet = decode(body) as any;
+    XMLHttpRequest.operations.push(packet.invocation?.operation ?? packet.type);
     const result = execFileSync(
       'curl',
       [
@@ -51,12 +56,22 @@ test('client contract through real HTTP, binary WebSocket and an isolated native
     return originalFetch(...args);
   };
   Object.assign(globalThis, { XMLHttpRequest, location: { href: url + '/', origin: url } });
-  const { lumiana, connect, node, hybridFetch, HybridWebSocket, importNode, nativeModule } =
-    await import('../dist/client.js');
+  const {
+    lumiana,
+    connect,
+    node,
+    hybridFetch,
+    HybridWebSocket,
+    importNode,
+    nativeModule,
+    nativeBindings,
+    invokeMember,
+  } = await import('../dist/client.js');
   const creds = { username: 'test', password: 'secret', url };
-  const compile = async (source: string) => {
-    const result = await transformSource(source, 'reader.js', {
+  const compile = async (source: string, origin = 'reader.js') => {
+    const result = await transformSource(source, origin, {
       place: async () => ({ native: true }),
+      origin,
       client: new URL('../dist/client.js', import.meta.url).href,
       access: new URL('../dist/access.js', import.meta.url).href,
     });
@@ -203,6 +218,27 @@ test('client contract through real HTTP, binary WebSocket and an isolated native
       assert.equal(await echoed, 'hello');
       socket.close();
     }
+    const { 0: WebSocketServer } = nativeBindings('ws', 'example/src/entry.ts', {
+      0: 'WebSocketServer',
+    });
+    const wsServer = new WebSocketServer({ port: 0 });
+    invokeMember(wsServer, 'on', 'connection', (socket: any) => {
+      socket.once('message', (data: Uint8Array) => socket.send(data));
+    });
+    await new Promise<void>((resolve) => invokeMember(wsServer, 'once', 'listening', resolve));
+    const wsPort = invokeMember<{ port: number }>(wsServer, 'address').port;
+    const { WebSocket: LocalWebSocket } = await import('ws');
+    const wsEcho = await new Promise<Uint8Array>((resolve, reject) => {
+      const socket = new LocalWebSocket(`ws://127.0.0.1:${wsPort}`);
+      socket.once('open', () => socket.send(new Uint8Array([0, 128, 255])));
+      socket.once('message', (data) => {
+        resolve(new Uint8Array(data as Buffer));
+        socket.close();
+      });
+      socket.once('error', reject);
+    });
+    assert.deepEqual(wsEcho, new Uint8Array([0, 128, 255]));
+    await new Promise<void>((resolve) => invokeMember(wsServer, 'close', resolve));
     const Readable = node('node:stream').Readable;
     class Stream extends Readable {
       _read() {
@@ -243,6 +279,35 @@ test('client contract through real HTTP, binary WebSocket and an isolated native
     await new Promise<void>((resolve, reject) =>
       server.close((error?: Error) => (error ? reject(error) : resolve())),
     );
+    const available = createServer();
+    available.listen(0, '127.0.0.1');
+    await once(available, 'listening');
+    const expressPort = (available.address() as { port: number }).port;
+    await new Promise<void>((resolve) => available.close(() => resolve()));
+    const beforeExpress = XMLHttpRequest.requests;
+    XMLHttpRequest.operations = [];
+    const express = await compile(
+      `import express from 'express';
+       const app=express();
+       app.get('/',(_request,response)=>response.send('Hello from Express'));
+       export const server=app.listen(${expressPort},()=>{});`,
+      'example/src/entry.ts',
+    );
+    assert.deepEqual(
+      XMLHttpRequest.operations.filter((operation) => operation !== 'callback-result'),
+      ['moduleBindings', 'apply', 'applyMember', 'applyMember'],
+      'the application performs one load, one factory call and two atomic method calls',
+    );
+    assert.equal(
+      XMLHttpRequest.requests - beforeExpress,
+      8,
+      'Express adds four callback-reflection replies while preserving live reference semantics',
+    );
+    assert.equal(
+      await (await originalFetch(`http://127.0.0.1:${expressPort}/`)).text(),
+      'Hello from Express',
+    );
+    await new Promise<void>((resolve) => invokeMember(express.server, 'close', resolve));
     const pending = Promise.resolve(runtime.forever());
     await new Promise((resolve) => setTimeout(resolve, 10));
     lumiana.disconnect();

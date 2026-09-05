@@ -29,7 +29,7 @@ test`), with separate text `bun.lock` files for root, example, and playground.
 
 - The project is Lumiana, a Vite integration for browser access to native Node.js
   handlers across a remote boundary.
-- The user is reviewing the runtime API before further optimization.
+- The user is reviewing runtime placement and request-count optimization.
 - Application runtime exports currently include `lumiana`, `connect`, `node`,
   and `Buffer` from `lumiana/client`. The Vite plugin is `lumiana` from `lumiana`.
 - Static property chains now share one invocation while their intermediate
@@ -48,6 +48,30 @@ test`), with separate text `bun.lock` files for root, example, and playground.
   loading and starting it takes two synchronous requests. The deployment manifest
   includes `@hono/node-server` automatically, and an end-to-end HTTP test reaches
   the browser Hono handler.
+- Static bindings from one native import now load in one synchronous request.
+  Calls such as `app.get('/', callback)` combine a remote method read and apply
+  when every argument is statically free of observable evaluation effects.
+  Unstable arguments retain separate native reflection so getter/argument order
+  remains exact. The real Express integration performs four application
+  operations at startup; Express adds four callback-reflection replies because
+  it inspects live browser-owned functions, for eight HTTP requests in the test.
+- `node:util` is in the portable built-in domain with `node:events` and
+  `node:buffer`, backed by the maintained `util` browser package. Native
+  `util.inherits(Boot, EventEmitter)` mutated a copied `Boot.prototype` because
+  plain records cross by value, leaving Fastify without `setMaxListeners`.
+  Executing `inherits` beside its caller-owned constructors preserves prototype
+  identity. A generic inheritance fixture covers this placement. A production
+  Vite 8 Fastify bundle was executed through the real host/Worker transport and
+  successfully served `Hello from Fastify`; its un-awaited `listen()` needed
+  time to settle before the measurement request.
+- Placement validates the static exports requested from a conditional browser
+  entry. If that resolved file omits a requested export and the package's Node
+  entry provides it, the import executes natively and the package is included in
+  deployment. This is an export contract, not a package-name exception. It fixes
+  `import { WebSocketServer } from 'ws'`: Vite selects `ws/browser.js`, which has
+  no such export, while the Node entry provides it. A synthetic conditional
+  package covers the compiler rule and the real `ws` server is constructed and
+  exchanges binary data through the host/Worker integration test.
 - `Invocation.path` carries reads; `Graph.path` resumes any remaining reads at
   the caller when values copy or references return home. Preserve snapshot,
   getter, error, receiver, assignment, and computed-key behavior. Do not cache
@@ -105,5 +129,16 @@ test`), with separate text `bun.lock` files for root, example, and playground.
 
 ## Next work
 
-Await the user's next optimization instruction. Creating this memory does not
-authorize an API redesign.
+Do not reduce live callback-reflection requests through metadata caching; it is
+observably incorrect for mutable functions and Proxies. Further reductions for
+frameworks that pass large application graphs into native adapters require a
+general co-location/execution-region contract, not framework-specific rewrites.
+The retained native-factory placement starts the real Elysia example in 28
+synchronous HTTP exchanges in the current Node 24/Vite 8 environment and serves
+an actual request successfully.
+An experiment kept `@elysia/node`'s record factory bundled and propagated Node
+export conditions through its dependencies. It preserved the correct Node
+`crossws`/`srvx` implementation but produced 211 synchronous exchanges at real
+startup because low-level server classes then reflected across the boundary.
+That experiment was reverted. Moving the adapter graph alone is not a valid
+optimization; Elysia and its native adapter would need a shared execution region.

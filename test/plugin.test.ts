@@ -38,6 +38,10 @@ test('Vite builds browser packages and deploys only proven or explicit native de
     await pkg('browser-cjs', {
       'index.js': "module.exports=(value={deep:{value:'cjs-proof'}})=>value.deep.value;",
     });
+    await pkg('portable-inheritance', {
+      'index.js':
+        "const {EventEmitter}=require('node:events');const {inherits}=require('node:util');function Boot(){this.setMaxListeners(0)}inherits(Boot,EventEmitter);module.exports=()=>new Boot() instanceof EventEmitter?'inheritance-proof':'broken';",
+    });
     await pkg(
       'conditional',
       {
@@ -46,6 +50,17 @@ test('Vite builds browser packages and deploys only proven or explicit native de
         'binding.node': 'binary',
       },
       { exports: { browser: './browser.js', default: './index.js' } },
+    );
+    await pkg(
+      'conditional-server',
+      {
+        'browser.js': "export const Client='browser-client-proof';",
+        'node.js': "export class WebSocketServer{constructor(){this.kind='node-server-proof'}}",
+      },
+      {
+        type: 'module',
+        exports: { browser: './browser.js', import: './node.js', default: './node.js' },
+      },
     );
     await pkg('native-addon', {
       'index.js': "module.exports=require('./binding.node');",
@@ -62,7 +77,7 @@ test('Vite builds browser packages and deploys only proven or explicit native de
     );
     await fs.writeFile(
       path.join(root, 'entry.js'),
-      "import {value,tmpdir} from 'portable';import cjs from 'browser-cjs';import condition from 'conditional';import addon from 'native-addon';import explicit from 'explicit';export * from 'node:os';document.body.textContent=[value,tmpdir(),cjs(),condition,addon,explicit].join(',');",
+      "import {value,tmpdir} from 'portable';import cjs from 'browser-cjs';import inheritance from 'portable-inheritance';import condition from 'conditional';import {WebSocketServer} from 'conditional-server';import addon from 'native-addon';import explicit from 'explicit';export * from 'node:os';const server=new WebSocketServer();document.body.textContent=[value,tmpdir(),cjs(),inheritance(),condition,server.kind,addon,explicit].join(',');",
     );
     await build({
       root,
@@ -82,13 +97,25 @@ test('Vite builds browser packages and deploys only proven or explicit native de
         (await fs.readdir(assets)).map((f) => fs.readFile(path.join(assets, f), 'utf8')),
       )
     ).join('\n');
-    for (const text of ['bundled-proof', 'cjs-proof', 'browser-condition-proof'])
+    for (const text of [
+      'bundled-proof',
+      'cjs-proof',
+      'inheritance-proof',
+      'browser-condition-proof',
+    ])
       assert.ok(output.includes(text), text);
-    for (const text of ['binary native-proof', 'explicit-proof'])
+    assert.ok(!output.includes('"node:util"'));
+    for (const text of [
+      'browser-client-proof',
+      'node-server-proof',
+      'binary native-proof',
+      'explicit-proof',
+    ])
       assert.ok(!output.includes(text), text);
     const manifest = JSON.parse(await fs.readFile(path.join(root, 'dist/package.json'), 'utf8'));
     assert.equal(manifest.dependencies['native-addon'], '1.0.0');
     assert.equal(manifest.dependencies.explicit, '1.0.0');
+    assert.equal(manifest.dependencies['conditional-server'], '1.0.0');
     assert.equal(manifest.dependencies.portable, undefined);
     assert.equal(manifest.dependencies.conditional, undefined);
     assert.ok((await fs.stat(path.join(root, 'dist/server/worker.js'))).size > 0);

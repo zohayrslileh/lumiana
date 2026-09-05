@@ -1,15 +1,16 @@
-import { Hono } from "hono"
-import { serve } from "@hono/node-server"
+import { System } from '@phreshos/node';
 
-const app = new Hono()
+const system = await System.connect();
 
-app.get("/", context => {
-  return context.text("Hello from Hono")
+const button = document.createElement("button")
+
+button.textContent = "Create"
+
+button.addEventListener("click", async function () {
+
+  const settings = await system.program.find("settings")
+
+  if (settings) console.log(await settings.process.create())
 })
 
-serve({
-  fetch: app.fetch,
-  port: 3000,
-})
-
-console.log("Hono is running on http://localhost:3000")
+document.body.appendChild(button)

@@ -2,10 +2,18 @@ import type { Plugin, ResolvedConfig, UserConfig } from 'vite';
 import { normalizePath } from 'vite';
 import fs from 'node:fs/promises';
 import path from 'node:path';
-import { fileURLToPath } from 'node:url';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 import { isBuiltin, createRequire } from 'node:module';
+import { resolve as resolveImport } from 'import-meta-resolve';
 import { attachHost } from './host.js';
-import { Bundling, bare, transformSource, nativeExportNames } from './build.js';
+import {
+  Bundling,
+  bare,
+  transformSource,
+  directExportNames,
+  nativeExportNames,
+  type Placement,
+} from './build.js';
 export interface LumianaPluginOptions {
   defaultCredentials?: {
     username?: string;
@@ -19,6 +27,7 @@ const clientId = '\0lumiana:client';
 const localBuiltins: Record<string, string> = Object.assign(Object.create(null), {
   events: 'events/',
   buffer: 'buffer/',
+  util: 'util/',
 });
 export function lumiana(options: LumianaPluginOptions = {}): Plugin {
   let resolveBrowser: ReturnType<ResolvedConfig['createResolver']>;
@@ -26,6 +35,12 @@ export function lumiana(options: LumianaPluginOptions = {}): Plugin {
     bundling: Bundling,
     deploymentDir: string,
     failed = false;
+  let placeModule: (
+    id: string,
+    importer?: string,
+    resolve?: (id: string) => Promise<string | undefined>,
+    requiredExports?: string[],
+  ) => Promise<Placement>;
   const defaultCredentials = {
     username: options.defaultCredentials?.username ?? 'lumiana',
     password: options.defaultCredentials?.password ?? 'lumiana',
@@ -51,10 +66,11 @@ export function lumiana(options: LumianaPluginOptions = {}): Plugin {
       deploymentDir = path.resolve(root, user.build?.outDir ?? 'dist');
       const require = createRequire(path.join(root, 'package.json'));
       const version = Number(require('vite/package.json').version.split('.')[0]);
-      const place = async (
+      placeModule = async (
         id: string,
         importer?: string,
         resolve?: (id: string) => Promise<string | undefined>,
+        requiredExports: string[] = [],
       ) => {
         if (localBuiltins[id.replace(/^node:/, '')]) return { native: false };
         let resolved: string | undefined;
@@ -63,7 +79,24 @@ export function lumiana(options: LumianaPluginOptions = {}): Plugin {
             ? await resolve(id)
             : createRequire(importer ?? path.join(root, 'package.json')).resolve(id);
         } catch {}
-        return bundling.placement(id, resolved);
+        const placement = await bundling.placement(id, resolved);
+        if (placement.native || !resolved || !requiredExports.length || !bare(id)) return placement;
+        try {
+          const parent = pathToFileURL(importer ?? path.join(root, 'package.json')).href;
+          const nativeURL = resolveImport(id, parent);
+          if (!nativeURL.startsWith('file:')) return placement;
+          const nativeFile = fileURLToPath(nativeURL);
+          if (path.resolve(nativeFile) === path.resolve(resolved)) return placement;
+          const browserNames = new Set(await directExportNames(resolved));
+          const missing = requiredExports.filter((name) => !browserNames.has(name));
+          if (!missing.length) return placement;
+          const nativeNames = new Set(
+            await nativeExportNames(id, importer ? path.dirname(importer) : root),
+          );
+          if (missing.every((name) => nativeNames.has(name)))
+            return bundling.unavailable(id, missing);
+        } catch {}
+        return placement;
       };
       const optimizer =
         version >= 8
@@ -79,7 +112,7 @@ export function lumiana(options: LumianaPluginOptions = {}): Plugin {
                       if (id === 'lumiana/client') return { id, external: true };
                       if (
                         (
-                          await place(id, importer, (specifier) =>
+                          await placeModule(id, importer, (specifier) =>
                             resolveBrowser(specifier, importer),
                           )
                         ).native
@@ -89,8 +122,13 @@ export function lumiana(options: LumianaPluginOptions = {}): Plugin {
                     async transform(this: any, code: string, id: string) {
                       if (skip(id)) return null;
                       return transformSource(code, id, {
-                        place: (specifier) =>
-                          place(specifier, id, (specifier) => resolveBrowser(specifier, id)),
+                        place: (specifier, required) =>
+                          placeModule(
+                            specifier,
+                            id,
+                            (specifier) => resolveBrowser(specifier, id),
+                            required,
+                          ),
                         origin: path.relative(root, id),
                         nativeOrigin: (specifier) => bundling.origin(id, specifier),
                         nativeUsage: (id) => bundling.usage(id),
@@ -118,7 +156,7 @@ export function lumiana(options: LumianaPluginOptions = {}): Plugin {
                           return { path: args.path, external: true };
                         if (
                           (
-                            await place(
+                            await placeModule(
                               args.path,
                               args.importer || undefined,
                               async (specifier) =>
@@ -138,8 +176,8 @@ export function lumiana(options: LumianaPluginOptions = {}): Plugin {
                         if (skip(args.path)) return;
                         const code = await fs.readFile(args.path, 'utf8');
                         const transformed = await transformSource(code, args.path, {
-                          place: (specifier) =>
-                            place(
+                          place: (specifier, required) =>
+                            placeModule(
                               specifier,
                               args.path,
                               async (specifier) =>
@@ -150,6 +188,7 @@ export function lumiana(options: LumianaPluginOptions = {}): Plugin {
                                     pluginData: { lumianaProbe: true },
                                   })
                                 ).path,
+                              required,
                             ),
                           origin: path.relative(root, args.path),
                           nativeOrigin: (specifier) => bundling.origin(args.path, specifier),
@@ -175,7 +214,7 @@ export function lumiana(options: LumianaPluginOptions = {}): Plugin {
       return {
         optimizeDeps: {
           exclude: ['lumiana/client'],
-          include: ['events/', 'buffer/'],
+          include: Object.values(localBuiltins),
           ...optimizer,
         },
         build: {
@@ -221,14 +260,8 @@ export function lumiana(options: LumianaPluginOptions = {}): Plugin {
         nativeUsage: (id) => bundling.usage(id),
         nativeSegment: (id) => bundling.segment(id),
         names: (specifier) => nativeExportNames(specifier, path.dirname(id)),
-        place: async (specifier) => {
-          if (localBuiltins[specifier.replace(/^node:/, '')]) return { native: false };
-          if (isBuiltin(specifier)) return { native: true };
-          if (!bare(specifier) || specifier === 'lumiana' || specifier.startsWith('lumiana/'))
-            return { native: false };
-          const resolved = await resolveBrowser(specifier, id);
-          return bundling.placement(specifier, resolved);
-        },
+        place: (specifier, required) =>
+          placeModule(specifier, id, (specifier) => resolveBrowser(specifier, id), required),
       });
     },
     configureServer(server) {

@@ -15,10 +15,14 @@
     "vite": "^8.2.2"
   },
   "dependencies": {
+    "@elysia/node": "^1.4.6",
     "@hono/node-server": "^2.1.1",
+    "@phreshos/node": "^0.1.15",
     "@types/node": "^26.4.1",
     "chokidar": "^5.0.0",
+    "elysia": "^1.4.30",
     "express": "^5.2.1",
+    "fastify": "^5.12.3",
     "hono": "^4.13.7",
     "lumiana": "link:lumiana",
     "sharp": "^0.35.4",

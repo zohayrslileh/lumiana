@@ -344,6 +344,21 @@ export function nativeModule<T = any>(
 ): T {
   return connection().refs.invokePath('module', [specifier, mode, origin], path);
 }
+/** @internal Resolve the bindings of one static native import in one request. */
+export function nativeBindings<T extends Record<number, any>>(
+  specifier: string,
+  origin: string | undefined,
+  bindings: Record<number, string>,
+): T {
+  return connection().refs.invoke('moduleBindings', specifier, origin, bindings);
+}
+/** @internal Read and call a method atomically when its receiver is remote. */
+export function invokeMember<T>(receiver: any, key: PropertyKey, ...args: any[]): T {
+  const refs = connection().refs;
+  if (refs.remote(receiver) !== undefined)
+    return refs.invoke('applyMember', receiver, key, ...args) as T;
+  return Reflect.apply(Reflect.get(receiver, key, receiver), receiver, args) as T;
+}
 /** @internal Native dynamic import emitted by Vite. */
 export function importNode(specifier: string, origin?: string): Promise<any> {
   return connection().refs.invokeAsync('module', specifier, 'namespace', origin);

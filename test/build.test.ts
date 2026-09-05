@@ -95,6 +95,23 @@ test('scope-aware transforms preserve explicit browser access and local bindings
   assert.match(transformed.code, /fetch: __lumiana/);
   assert.match(transformed.code, /hybridFetch as/);
 });
+test('module placement receives the exports required by each static use', async () => {
+  const requested: [string, string[]][] = [];
+  await transformSource(
+    "import {WebSocketServer as Server} from 'conditional-server';const Receiver=require('conditional-server').Receiver;void Server;void Receiver;",
+    'entry.ts',
+    {
+      place: async (id, names = []) => {
+        requested.push([id, names]);
+        return { native: false };
+      },
+    },
+  );
+  assert.deepEqual(requested, [
+    ['conditional-server', ['WebSocketServer']],
+    ['conditional-server', ['Receiver']],
+  ]);
+});
 test('bundling is the default; Node built-ins are not grounds for excluding a package', async () => {
   const temp = await fs.mkdtemp(path.join(os.tmpdir(), 'lumiana-placement-'));
   try {
@@ -130,7 +147,23 @@ test('bundling is the default; Node built-ins are not grounds for excluding a pa
     );
     assert.equal(segmented, 'good');
     assert.match(transformed!.code, /import \{add\} from "good"/);
-    assert.match(transformed!.code, /\("good","namespace",null,\["read"\]\)/);
+    assert.match(transformed!.code, /nativeBindings as/);
+    assert.match(transformed!.code, /\("good",undefined,\{"0":"read"\}\)/);
+
+    const nativeApplication = await transformSource(
+      "import create from 'native-package';const app=create();app.get('/',()=>42);app.listen(3000,()=>{});",
+      'entry.js',
+      { place: async () => ({ native: true }) },
+    );
+    assert.match(nativeApplication!.code, /\("native-package",undefined,\{"0":"default"\}\)/);
+    assert.equal(nativeApplication!.code.match(/invokeMember as/g)?.length, 1);
+    assert.equal(nativeApplication!.code.match(/__lumiana\d+\(app,"(?:get|listen)"/g)?.length, 2);
+    const ordered = await transformSource(
+      "import create from 'native-package';const app=create();app.get(argument());",
+      'entry.js',
+      { place: async () => ({ native: true }) },
+    );
+    assert.doesNotMatch(ordered!.code, /__lumiana\d+\(app,"get"/);
   } finally {
     await fs.rm(temp, { recursive: true, force: true });
   }

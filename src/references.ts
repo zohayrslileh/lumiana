@@ -174,6 +174,9 @@ export class References implements ValueReferences {
       case 'apply':
         result = Reflect.apply(value, key, rest);
         break;
+      case 'applyMember':
+        result = Reflect.apply(Reflect.get(value, key, value), value, rest);
+        break;
       case 'construct':
         result = Reflect.construct(value, rest, key ?? value);
         break;

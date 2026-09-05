@@ -15,8 +15,30 @@ export interface Placement {
   reason?: string;
   nativeExports?: string[];
 }
-const portableBuiltins = new Set(['buffer', 'node:buffer', 'events', 'node:events']);
+const portableBuiltins = new Set([
+  'buffer',
+  'node:buffer',
+  'events',
+  'node:events',
+  'util',
+  'node:util',
+]);
 const nativeGlobals = new Set(['process', 'global', 'setImmediate', 'clearImmediate']);
+
+function unwrapExpression(node: any): any {
+  while (
+    node &&
+    [
+      'TSAsExpression',
+      'TSTypeAssertion',
+      'TSNonNullExpression',
+      'TSSatisfiesExpression',
+      'ParenthesizedExpression',
+    ].includes(node.type)
+  )
+    node = node.expression;
+  return node;
+}
 
 /** Find exports whose implementation transitively depends on a native capability. */
 function nativeCapabilityExports(source: string): string[] {
@@ -39,8 +61,9 @@ function nativeCapabilityExports(source: string): string[] {
         for (const specifier of node.specifiers)
           if (specifier.local?.name)
             exports.set(specifier.exported.name ?? specifier.exported.value, specifier.local.name);
-    } else if (node.type === 'ExportDefaultDeclaration' && node.declaration?.id?.name) {
-      exports.set('default', node.declaration.id.name);
+    } else if (node.type === 'ExportDefaultDeclaration') {
+      const local = node.declaration?.id?.name ?? node.declaration?.name;
+      if (local) exports.set('default', local);
     }
   }
   const memo = new Map<any, boolean>(),
@@ -119,6 +142,11 @@ export class Bundling {
   }
   segment(id: string): void {
     if (!isBuiltin(id)) this.external.set(packageName(id), 'Native-dependent export');
+  }
+  unavailable(id: string, names: string[]): Placement {
+    const reason = `Browser condition omits ${names.join(', ')}`;
+    if (!isBuiltin(id)) this.external.set(packageName(id), reason);
+    return { native: true, reason };
   }
   constructor(
     readonly root: string,
@@ -247,7 +275,7 @@ export class Bundling {
   }
 }
 export interface TransformOptions {
-  place(id: string): Promise<Placement>;
+  place(id: string, requiredExports?: string[]): Promise<Placement>;
   client?: string;
   access?: string;
   nativeUsage?(id?: string): void;
@@ -282,6 +310,43 @@ function staticKey(node: any): string | undefined {
   if (!node.computed && node.property.type === 'Identifier') return node.property.name;
   if (node.computed && ['StringLiteral', 'NumericLiteral'].includes(node.property.type))
     return String(node.property.value);
+}
+
+/** Expressions whose evaluation cannot observe moving a remote property read past them. */
+function stableArgument(node: any): boolean {
+  node = unwrapExpression(node);
+  if (!node) return false;
+  if (
+    [
+      'NullLiteral',
+      'BooleanLiteral',
+      'NumericLiteral',
+      'StringLiteral',
+      'BigIntLiteral',
+      'RegExpLiteral',
+      'FunctionExpression',
+      'ArrowFunctionExpression',
+    ].includes(node.type)
+  )
+    return true;
+  if (node.type === 'TemplateLiteral')
+    return node.expressions.every((expression: any) => stableArgument(expression));
+  if (node.type === 'UnaryExpression' && node.operator !== 'delete')
+    return stableArgument(node.argument);
+  if (node.type === 'ArrayExpression')
+    return node.elements.every(
+      (element: any) =>
+        element === null || (element.type !== 'SpreadElement' && stableArgument(element)),
+    );
+  if (node.type === 'ObjectExpression')
+    return node.properties.every(
+      (property: any) =>
+        property.type === 'ObjectProperty' &&
+        !property.computed &&
+        !property.method &&
+        stableArgument(property.value),
+    );
+  return false;
 }
 /** A call's receiver and an assignment's target must remain member expressions. */
 function valueRead(p: any): boolean {
@@ -348,7 +413,8 @@ export async function transformSource(source: string, id: string, options: Trans
   const moduleNodes: any[] = [],
     globals: any[] = [],
     members: any[] = [],
-    calls: any[] = [];
+    calls: any[] = [],
+    variables: any[] = [];
   let counter = 0;
   const reserved = new Set<string>();
   traverse(ast as any, {
@@ -364,13 +430,15 @@ export async function transformSource(source: string, id: string, options: Trans
     return n;
   };
   const nodeName = name(),
+    bindingsName = name(),
     importName = name(),
     nativeName = name(),
     fetchName = name(),
     socketName = name(),
     bufferName = name(),
     readName = name(),
-    evaluateName = name();
+    evaluateName = name(),
+    invokeName = name();
   const used = new Set<string>();
   const esm = ast.program.body.some(
     (node) => node.type.startsWith('Import') || node.type.startsWith('Export'),
@@ -410,6 +478,9 @@ export async function transformSource(source: string, id: string, options: Trans
           p.node.arguments[0]?.type === 'StringLiteral' ? p.node.arguments[0].value : undefined,
         );
     },
+    VariableDeclarator(p: any) {
+      variables.push(p);
+    },
     ImportExpression(p: any) {
       if (p.node.source.type === 'StringLiteral') moduleNodes.push(p);
     },
@@ -435,21 +506,61 @@ export async function transformSource(source: string, id: string, options: Trans
         globals.push(p);
     },
   });
-  const removed: [number, number][] = [];
+  const removed: [number, number][] = [],
+    remoteBindings = new Set<any>();
+  const nativeBindingsCall = (specifier: string, exported: string[]) => {
+    const bindings = Object.fromEntries(exported.map((name, index) => [index, name]));
+    const origin = options.origin ? JSON.stringify(options.origin) : 'undefined';
+    return `${bindingsName}(${JSON.stringify(specifier)},${origin},${JSON.stringify(bindings)})`;
+  };
+  const destructureBindings = (locals: string[], call: string) =>
+    locals.length
+      ? `const {${locals.map((local, index) => `${index}:${local}`).join(',')}}=${call};`
+      : `${call};`;
+  const bindingCall = (specifier: string, bindings: any[]) => {
+    const exported = bindings.map((item) =>
+      item.type === 'ImportDefaultSpecifier'
+        ? 'default'
+        : item.type === 'ImportNamespaceSpecifier'
+          ? '*'
+          : (item.imported.name ?? item.imported.value),
+    );
+    return destructureBindings(
+      bindings.map((item) => item.local.name),
+      nativeBindingsCall(specifier, exported),
+    );
+  };
   for (const p of moduleNodes) {
     const n = p.node,
       specifier = n.source?.value ?? n.arguments?.[0]?.value;
-    const placement = await options.place(specifier);
+    const requiredExports =
+      n.type === 'ImportDeclaration'
+        ? n.specifiers
+            .filter((item: any) => item.type === 'ImportSpecifier' && item.importKind !== 'type')
+            .map((item: any) => item.imported.name ?? item.imported.value)
+        : n.type === 'ExportNamedDeclaration'
+          ? n.specifiers
+              .filter((item: any) => item.type !== 'ExportNamespaceSpecifier')
+              .map((item: any) => item.local.name ?? item.local.value)
+          : n.type === 'CallExpression'
+            ? extendRead(p).keys.slice(0, 1)
+            : [];
+    const placement = await options.place(specifier, requiredExports);
     if (!placement.native && n.type === 'ImportDeclaration' && placement.nativeExports?.length) {
       const nativeExports = new Set(placement.nativeExports);
       const selected = n.specifiers.filter((specifier: any) => {
+        if (specifier.importKind === 'type') return false;
         if (specifier.type === 'ImportDefaultSpecifier') return nativeExports.has('default');
         if (specifier.type !== 'ImportSpecifier') return false;
         return nativeExports.has(specifier.imported.name ?? specifier.imported.value);
       });
       if (selected.length) {
         options.nativeSegment?.(specifier);
-        used.add('nativeModule');
+        used.add('nativeBindings');
+        for (const item of selected) {
+          const binding = p.scope.getBinding(item.local.name);
+          if (binding) remoteBindings.add(binding);
+        }
         const remaining = n.specifiers.filter((item: any) => !selected.includes(item));
         const imported = remaining.filter((item: any) => item.type === 'ImportSpecifier');
         const localImport = remaining.length
@@ -465,22 +576,16 @@ export async function transformSource(source: string, id: string, options: Trans
                     `{${imported
                       .map((item: any) => {
                         const name = item.imported.name ?? item.imported.value;
-                        return name === item.local.name ? name : `${name} as ${item.local.name}`;
+                        const binding =
+                          name === item.local.name ? name : `${name} as ${item.local.name}`;
+                        return item.importKind === 'type' ? `type ${binding}` : binding;
                       })
                       .join(',')}}`,
                   ]
                 : []),
             ].join(',')} from ${JSON.stringify(specifier)};`
           : '';
-        const declarations = selected
-          .map((item: any) => {
-            const exported =
-              item.type === 'ImportDefaultSpecifier'
-                ? 'default'
-                : (item.imported.name ?? item.imported.value);
-            return `const ${item.local.name}=${nodeName}(${JSON.stringify(specifier)},"namespace",${JSON.stringify(options.origin ?? null)},${JSON.stringify([exported])});`;
-          })
-          .join('');
+        const declarations = bindingCall(specifier, selected);
         edits.overwrite(n.start, n.end, localImport + declarations);
         removed.push([n.start, n.end]);
       }
@@ -488,41 +593,46 @@ export async function transformSource(source: string, id: string, options: Trans
     }
     if (!placement.native) continue;
     options.nativeOrigin?.(specifier);
-    used.add('nativeModule');
     const call = (mode?: string) =>
       `${nodeName}(${JSON.stringify(specifier)}${mode || options.origin ? ',' + JSON.stringify(mode ?? null) : ''}${options.origin ? ',' + JSON.stringify(options.origin) : ''})`;
     let replacement: string;
     if (n.type === 'ImportDeclaration') {
       const bindings = n.specifiers.filter((s: any) => s.importKind !== 'type');
-      const namespace = name();
-      replacement =
-        `const ${namespace}=${call('namespace')};` +
-        bindings
-          .map(
-            (s: any) =>
-              `const ${s.local.name}=${s.type === 'ImportDefaultSpecifier' ? call('default') : s.type === 'ImportNamespaceSpecifier' ? namespace : `${namespace}[${JSON.stringify(s.imported.name ?? s.imported.value)}]`};`,
-          )
-          .join('');
+      used.add('nativeBindings');
+      for (const item of bindings) {
+        const binding = p.scope.getBinding(item.local.name);
+        if (binding) remoteBindings.add(binding);
+      }
+      replacement = bindingCall(specifier, bindings);
     } else if (n.type === 'ExportAllDeclaration') {
       const names = await options.names?.(specifier);
       if (!names) throw new Error(`Cannot determine native exports for ${specifier}`);
-      replacement = names
-        .map((exported) => {
-          const local = name();
-          return `const ${local}=${call('namespace')}[${JSON.stringify(exported)}];export {${local} as ${JSON.stringify(exported)}};`;
-        })
-        .join('');
+      used.add('nativeBindings');
+      const locals: string[] = names.map(() => name());
+      replacement =
+        destructureBindings(locals, nativeBindingsCall(specifier, names)) +
+        locals
+          .map((local, index) => `export {${local} as ${JSON.stringify(names[index])}};`)
+          .join('');
     } else if (n.type === 'ExportNamedDeclaration') {
-      replacement = n.specifiers
-        .map((s: any) => {
-          const local = name();
-          return `const ${local}=${s.type === 'ExportNamespaceSpecifier' ? call('namespace') : `${call('namespace')}[${JSON.stringify(s.local.name ?? s.local.value)}]`};export {${local} as ${s.exported.name}};`;
-        })
-        .join('');
+      used.add('nativeBindings');
+      const locals: string[] = n.specifiers.map(() => name());
+      const exported = n.specifiers.map((s: any) =>
+        s.type === 'ExportNamespaceSpecifier' ? '*' : (s.local.name ?? s.local.value),
+      );
+      replacement =
+        destructureBindings(locals, nativeBindingsCall(specifier, exported)) +
+        locals
+          .map(
+            (local, index) =>
+              `export {${local} as ${n.specifiers[index].exported.name ?? JSON.stringify(n.specifiers[index].exported.value)}};`,
+          )
+          .join('');
     } else if (n.type === 'ImportExpression') {
       used.add('importNode');
       replacement = `${importName}(${JSON.stringify(specifier)}${options.origin ? ',' + JSON.stringify(options.origin) : ''})`;
     } else {
+      used.add('nativeModule');
       const { end, keys } = extendRead(p);
       replacement = keys.length
         ? `${nodeName}(${JSON.stringify(specifier)},null,${JSON.stringify(options.origin ?? null)},${JSON.stringify(keys)})`
@@ -534,11 +644,53 @@ export async function transformSource(source: string, id: string, options: Trans
     edits.overwrite(n.start, n.end, replacement);
     removed.push([n.start, n.end]);
   }
+
+  const remoteExpression = (node: any, scope: any): boolean => {
+    node = unwrapExpression(node);
+    if (!node) return false;
+    if (node.type === 'Identifier') return remoteBindings.has(scope.getBinding(node.name));
+    if (node.type === 'MemberExpression') return remoteExpression(node.object, scope);
+    if (node.type === 'CallExpression' || node.type === 'NewExpression')
+      return remoteExpression(node.callee, scope);
+    return false;
+  };
+  let discovered = true;
+  while (discovered) {
+    discovered = false;
+    for (const variable of variables) {
+      if (variable.node.id.type !== 'Identifier' || !variable.node.init) continue;
+      const binding = variable.scope.getBinding(variable.node.id.name);
+      if (
+        binding?.constant &&
+        !remoteBindings.has(binding) &&
+        remoteExpression(variable.node.init, variable.scope)
+      ) {
+        remoteBindings.add(binding);
+        discovered = true;
+      }
+    }
+  }
   for (const p of calls) {
     const n = p.node;
     if (removed.some(([start, end]) => n.start >= start && n.end <= end)) continue;
     if (n.optional || n.callee.type !== 'MemberExpression' || n.callee.optional) continue;
     const key = staticKey(n.callee);
+    if (
+      key !== undefined &&
+      n.callee.object.type === 'Identifier' &&
+      remoteExpression(n.callee.object, p.scope) &&
+      n.arguments.every(
+        (argument: any) => argument.type !== 'SpreadElement' && stableArgument(argument),
+      )
+    ) {
+      used.add('invokeMember');
+      edits.appendLeft(n.callee.object.start, `${invokeName}(`);
+      if (n.arguments.length)
+        edits.overwrite(n.callee.object.end, n.arguments[0].start, `,${JSON.stringify(key)},`);
+      else edits.overwrite(n.callee.object.end, n.end, `,${JSON.stringify(key)})`);
+      removed.push([n.callee.start, n.callee.end]);
+      continue;
+    }
     if (
       key === undefined ||
       n.callee.object.type !== 'Identifier' ||
@@ -621,12 +773,14 @@ export async function transformSource(source: string, id: string, options: Trans
   if (!used.size) return null;
   const names: Record<string, string> = {
     nativeModule: nodeName,
+    nativeBindings: bindingsName,
     importNode: importName,
     nativeGlobal: nativeName,
     hybridFetch: fetchName,
     HybridWebSocket: socketName,
     Buffer: bufferName,
     evaluateIntrinsic: evaluateName,
+    invokeMember: invokeName,
   };
   if (used.delete('readPath')) {
     const access = JSON.stringify(options.access ?? 'lumiana/internal');
@@ -646,6 +800,20 @@ export async function transformSource(source: string, id: string, options: Trans
     code: edits.toString(),
     map: edits.generateMap({ hires: true, source: id, includeContent: true }).toString(),
   };
+}
+
+/** Read the exports declared by one resolved file without executing it. */
+export async function directExportNames(file: string): Promise<string[]> {
+  const source = await fs.readFile(file, 'utf8'),
+    names = new Set<string>();
+  await Promise.all([initCJS(), initESM]);
+  try {
+    for (const item of parseESM(source)[1]) names.add(item.n);
+  } catch {}
+  try {
+    for (const name of parseCJS(source).exports) names.add(name);
+  } catch {}
+  return [...names];
 }
 
 /** Use the same static export evidence as module loaders; never execute packages. */
