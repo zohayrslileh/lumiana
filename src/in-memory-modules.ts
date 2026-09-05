@@ -549,6 +549,22 @@ export const types = {
   isArrayBuffer: v => v instanceof ArrayBuffer,
 };
 
+export function formatWithOptions(inspectOptions, formatStr, ...args) {
+  return format(formatStr, ...args);
+}
+
+export function parseEnv(content) {
+  return {};
+}
+
+export function stripVTControlCharacters(str) {
+  return typeof str === 'string' ? str.replace(/\x1B\[[0-9;]*[a-zA-Z]/g, '') : '';
+}
+
+export function styleText(format, text) {
+  return text;
+}
+
 export const TextEncoder = globalThis.TextEncoder;
 export const TextDecoder = globalThis.TextDecoder;
 
@@ -557,6 +573,10 @@ const _util = {
   callbackify,
   inherits,
   format,
+  formatWithOptions,
+  parseEnv,
+  stripVTControlCharacters,
+  styleText,
   inspect,
   deprecate,
   types,
@@ -603,10 +623,29 @@ export const constants = {
 export const isAscii = () => true;
 export const isUtf8 = () => true;
 
+export const byteLength = LumianaBuffer.byteLength.bind(LumianaBuffer);
+export const isBuffer = LumianaBuffer.isBuffer.bind(LumianaBuffer);
+export const isEncoding = LumianaBuffer.isEncoding.bind(LumianaBuffer);
+export const concat = LumianaBuffer.concat.bind(LumianaBuffer);
+export const compare = LumianaBuffer.compare.bind(LumianaBuffer);
+export const alloc = LumianaBuffer.alloc.bind(LumianaBuffer);
+export const allocUnsafe = LumianaBuffer.allocUnsafe.bind(LumianaBuffer);
+export const allocUnsafeSlow = LumianaBuffer.allocUnsafeSlow.bind(LumianaBuffer);
+export const from = LumianaBuffer.from.bind(LumianaBuffer);
+
 LumianaBuffer.Buffer = LumianaBuffer;
 LumianaBuffer.SlowBuffer = LumianaBuffer;
 LumianaBuffer.kMaxLength = kMaxLength;
 LumianaBuffer.constants = constants;
+LumianaBuffer.byteLength = byteLength;
+LumianaBuffer.isBuffer = isBuffer;
+LumianaBuffer.isEncoding = isEncoding;
+LumianaBuffer.concat = concat;
+LumianaBuffer.compare = compare;
+LumianaBuffer.alloc = alloc;
+LumianaBuffer.allocUnsafe = allocUnsafe;
+LumianaBuffer.allocUnsafeSlow = allocUnsafeSlow;
+LumianaBuffer.from = from;
 
 export default LumianaBuffer;
 `;

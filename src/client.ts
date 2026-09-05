@@ -185,56 +185,86 @@ export interface LumianaRunContext {
   [key: string]: unknown;
 }
 
-export interface LumianaClient {
+export interface Lumiana {
+  connected(): boolean;
+  disconnect(): void;
   ping(): Promise<PingResult>;
-  run<T = unknown>(
-    fn: string | (() => Promise<T> | T) | ((ctx: LumianaRunContext, ...args: any[]) => Promise<T> | T),
-    ...args: any[]
-  ): any;
-  readonly node: LumianaNode;
-  send(data: Uint8Array): void;
-  onMessage(callback: (data: Uint8Array) => void): () => void;
-  close(): void;
-  readonly ws: WebSocket;
 }
+
+export type LumianaClient = Lumiana;
 
 export interface Credentials {
-  readonly username?: string;
-  readonly password?: string;
+  readonly username: string;
+  readonly password: string;
+  readonly url?: string;
+  readonly syncUrl?: string;
 }
 
+export interface ConnectAPI {
+  credentials(creds: Credentials): Promise<Lumiana>;
+}
+
+interface ActiveConnection {
+  ws: WebSocket;
+  pendingRequests: Map<string, { resolve: (val: unknown) => void; reject: (err: Error) => void }>;
+  pendingPings: Map<number, (res: PingResult) => void>;
+  sendNodeRequest(
+    path: string[],
+    args: unknown[] | null,
+    isCall: boolean,
+    refId?: string | null,
+    isConstructor?: boolean
+  ): Promise<unknown>;
+}
+
+let activeConnection: ActiveConnection | null = null;
+let isConnecting = false;
 let activeCredentials: Credentials = { username: 'lumiana', password: 'lumiana' };
-let activeClientPromise: Promise<LumianaClient> | null = null;
 
 export class LumianaBuffer extends Uint8Array {
   static get [Symbol.species]() {
     return LumianaBuffer;
   }
 
-  override toString(encoding: string = 'utf8'): string {
-    const enc = encoding.toLowerCase().replace('-', '');
+  get _isBuffer(): boolean {
+    return true;
+  }
+
+  override toString(encoding: string = 'utf8', start?: number, end?: number): string {
+    const sub = (start !== undefined || end !== undefined) ? this.subarray(start, end) : this;
+    const enc = (encoding || 'utf8').toLowerCase().replace('-', '');
     if (enc === 'hex') {
-      return Array.from(this)
-        .map(b => b.toString(16).padStart(2, '0'))
-        .join('');
-    }
-    if (enc === 'base64') {
-      let binary = '';
-      const len = this.byteLength;
-      for (let i = 0; i < len; i++) {
-        binary += String.fromCharCode(this[i]);
+      let hex = '';
+      for (let i = 0; i < sub.length; i++) {
+        hex += sub[i].toString(16).padStart(2, '0');
       }
-      return typeof btoa !== 'undefined' ? btoa(binary) : Buffer.from(this).toString('base64');
+      return hex;
     }
-    return new TextDecoder(enc === 'utf8' ? 'utf-8' : encoding).decode(this);
+    if (enc === 'base64' || enc === 'base64url') {
+      let binary = '';
+      const len = sub.length;
+      for (let i = 0; i < len; i++) {
+        binary += String.fromCharCode(sub[i]);
+      }
+      const b64 = typeof btoa !== 'undefined' ? btoa(binary) : '';
+      return enc === 'base64url' ? b64.replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '') : b64;
+    }
+    if (enc === 'ascii' || enc === 'latin1' || enc === 'binary') {
+      let str = '';
+      for (let i = 0; i < sub.length; i++) {
+        str += String.fromCharCode(sub[i]);
+      }
+      return str;
+    }
+    return new TextDecoder(enc === 'utf8' ? 'utf-8' : encoding).decode(sub);
   }
 
   write(string: string, offset: number = 0, length?: number | string, encoding: string = 'utf8'): number {
     const enc = typeof length === 'string' ? length : encoding;
     const len = typeof length === 'number' ? length : this.length - offset;
-    const encoded = new TextEncoder().encode(string);
-    const toCopy = Math.min(len, encoded.length, this.length - offset);
-    this.set(encoded.subarray(0, toCopy), offset);
+    const buf = LumianaBuffer.from(string, enc);
+    const toCopy = Math.min(len, buf.length, Math.max(0, this.length - offset));
+    this.set(buf.subarray(0, toCopy), offset);
     return toCopy;
   }
 
@@ -254,12 +284,38 @@ export class LumianaBuffer extends Uint8Array {
     return true;
   }
 
-  readUInt32BE(offset: number = 0): number {
-    return new DataView(this.buffer, this.byteOffset, this.byteLength).getUint32(offset, false);
+  compare(target: Uint8Array, targetStart: number = 0, targetEnd?: number, sourceStart: number = 0, sourceEnd?: number): number {
+    const src = this.subarray(sourceStart, sourceEnd);
+    const tgt = target.subarray(targetStart, targetEnd);
+    return LumianaBuffer.compare(src, tgt);
   }
 
-  readUInt32LE(offset: number = 0): number {
-    return new DataView(this.buffer, this.byteOffset, this.byteLength).getUint32(offset, true);
+  slice(start?: number, end?: number): LumianaBuffer {
+    const sub = super.subarray(start, end);
+    return new LumianaBuffer(sub.buffer, sub.byteOffset, sub.byteLength);
+  }
+
+  override subarray(start?: number, end?: number): LumianaBuffer {
+    const sub = super.subarray(start, end);
+    return new LumianaBuffer(sub.buffer, sub.byteOffset, sub.byteLength);
+  }
+
+  readUInt8(offset: number = 0): number {
+    return this[offset];
+  }
+
+  readInt8(offset: number = 0): number {
+    return new DataView(this.buffer, this.byteOffset, this.byteLength).getInt8(offset);
+  }
+
+  writeUInt8(val: number, offset: number = 0): number {
+    this[offset] = val & 0xff;
+    return offset + 1;
+  }
+
+  writeInt8(val: number, offset: number = 0): number {
+    new DataView(this.buffer, this.byteOffset, this.byteLength).setInt8(offset, val);
+    return offset + 1;
   }
 
   readUInt16BE(offset: number = 0): number {
@@ -268,6 +324,50 @@ export class LumianaBuffer extends Uint8Array {
 
   readUInt16LE(offset: number = 0): number {
     return new DataView(this.buffer, this.byteOffset, this.byteLength).getUint16(offset, true);
+  }
+
+  readInt16BE(offset: number = 0): number {
+    return new DataView(this.buffer, this.byteOffset, this.byteLength).getInt16(offset, false);
+  }
+
+  readInt16LE(offset: number = 0): number {
+    return new DataView(this.buffer, this.byteOffset, this.byteLength).getInt16(offset, true);
+  }
+
+  writeUInt16BE(val: number, offset: number = 0): number {
+    new DataView(this.buffer, this.byteOffset, this.byteLength).setUint16(offset, val, false);
+    return offset + 2;
+  }
+
+  writeUInt16LE(val: number, offset: number = 0): number {
+    new DataView(this.buffer, this.byteOffset, this.byteLength).setUint16(offset, val, true);
+    return offset + 2;
+  }
+
+  writeInt16BE(val: number, offset: number = 0): number {
+    new DataView(this.buffer, this.byteOffset, this.byteLength).setInt16(offset, val, false);
+    return offset + 2;
+  }
+
+  writeInt16LE(val: number, offset: number = 0): number {
+    new DataView(this.buffer, this.byteOffset, this.byteLength).setInt16(offset, val, true);
+    return offset + 2;
+  }
+
+  readUInt32BE(offset: number = 0): number {
+    return new DataView(this.buffer, this.byteOffset, this.byteLength).getUint32(offset, false);
+  }
+
+  readUInt32LE(offset: number = 0): number {
+    return new DataView(this.buffer, this.byteOffset, this.byteLength).getUint32(offset, true);
+  }
+
+  readInt32BE(offset: number = 0): number {
+    return new DataView(this.buffer, this.byteOffset, this.byteLength).getInt32(offset, false);
+  }
+
+  readInt32LE(offset: number = 0): number {
+    return new DataView(this.buffer, this.byteOffset, this.byteLength).getInt32(offset, true);
   }
 
   writeUInt32BE(val: number, offset: number = 0): number {
@@ -280,18 +380,101 @@ export class LumianaBuffer extends Uint8Array {
     return offset + 4;
   }
 
-  static isBuffer(obj: unknown): boolean {
-    return obj instanceof LumianaBuffer || obj instanceof Uint8Array;
+  writeInt32BE(val: number, offset: number = 0): number {
+    new DataView(this.buffer, this.byteOffset, this.byteLength).setInt32(offset, val, false);
+    return offset + 4;
   }
 
-  static alloc(size: number, fill?: number | string, encoding: string = 'utf8'): LumianaBuffer {
+  writeInt32LE(val: number, offset: number = 0): number {
+    new DataView(this.buffer, this.byteOffset, this.byteLength).setInt32(offset, val, true);
+    return offset + 4;
+  }
+
+  readFloatBE(offset: number = 0): number {
+    return new DataView(this.buffer, this.byteOffset, this.byteLength).getFloat32(offset, false);
+  }
+
+  readFloatLE(offset: number = 0): number {
+    return new DataView(this.buffer, this.byteOffset, this.byteLength).getFloat32(offset, true);
+  }
+
+  writeFloatBE(val: number, offset: number = 0): number {
+    new DataView(this.buffer, this.byteOffset, this.byteLength).setFloat32(offset, val, false);
+    return offset + 4;
+  }
+
+  writeFloatLE(val: number, offset: number = 0): number {
+    new DataView(this.buffer, this.byteOffset, this.byteLength).setFloat32(offset, val, true);
+    return offset + 4;
+  }
+
+  readDoubleBE(offset: number = 0): number {
+    return new DataView(this.buffer, this.byteOffset, this.byteLength).getFloat64(offset, false);
+  }
+
+  readDoubleLE(offset: number = 0): number {
+    return new DataView(this.buffer, this.byteOffset, this.byteLength).getFloat64(offset, true);
+  }
+
+  writeDoubleBE(val: number, offset: number = 0): number {
+    new DataView(this.buffer, this.byteOffset, this.byteLength).setFloat64(offset, val, false);
+    return offset + 8;
+  }
+
+  writeDoubleLE(val: number, offset: number = 0): number {
+    new DataView(this.buffer, this.byteOffset, this.byteLength).setFloat64(offset, val, true);
+    return offset + 8;
+  }
+
+  static isBuffer(obj: unknown): boolean {
+    return obj instanceof Uint8Array || (obj !== null && typeof obj === 'object' && (obj as any)._isBuffer === true);
+  }
+
+  static isEncoding(encoding: string): boolean {
+    if (typeof encoding !== 'string' || encoding.length === 0) return false;
+    const enc = encoding.toLowerCase().replace('-', '');
+    return ['utf8', 'utf16le', 'ucs2', 'base64', 'base64url', 'latin1', 'binary', 'hex', 'ascii'].includes(enc);
+  }
+
+  static byteLength(string: unknown, encoding: string = 'utf8'): number {
+    if (typeof string === 'string') {
+      const enc = (encoding || 'utf8').toLowerCase().replace('-', '');
+      if (enc === 'hex') return string.length >>> 1;
+      if (enc === 'base64' || enc === 'base64url') {
+        let len = string.length;
+        if (string.endsWith('==')) len -= 2;
+        else if (string.endsWith('=')) len -= 1;
+        return Math.max(0, Math.floor((len * 3) / 4));
+      }
+      if (enc === 'ascii' || enc === 'latin1' || enc === 'binary') return string.length;
+      if (enc === 'utf16le' || enc === 'ucs2') return string.length * 2;
+      return new TextEncoder().encode(string).length;
+    }
+    if (string instanceof Uint8Array || string instanceof ArrayBuffer || (string && typeof (string as any).byteLength === 'number')) {
+      return (string as any).byteLength;
+    }
+    return 0;
+  }
+
+  static compare(buf1: Uint8Array, buf2: Uint8Array): number {
+    if (buf1 === buf2) return 0;
+    const len = Math.min(buf1.length, buf2.length);
+    for (let i = 0; i < len; i++) {
+      if (buf1[i] !== buf2[i]) {
+        return buf1[i] < buf2[i] ? -1 : 1;
+      }
+    }
+    return buf1.length < buf2.length ? -1 : (buf1.length > buf2.length ? 1 : 0);
+  }
+
+  static alloc(size: number, fill?: number | string | Uint8Array, encoding: string = 'utf8'): LumianaBuffer {
     const buf = new LumianaBuffer(size);
     if (fill !== undefined) {
       if (typeof fill === 'number') {
         buf.fill(fill);
-      } else if (typeof fill === 'string') {
-        const fillBuf = LumianaBuffer.from(fill, encoding);
-        if (fillBuf.length > 0) {
+      } else {
+        const fillBuf = typeof fill === 'string' ? LumianaBuffer.from(fill, encoding) : fill;
+        if (fillBuf && fillBuf.length > 0) {
           for (let i = 0; i < size; i++) {
             buf[i] = fillBuf[i % fillBuf.length];
           }
@@ -302,6 +485,10 @@ export class LumianaBuffer extends Uint8Array {
   }
 
   static allocUnsafe(size: number): LumianaBuffer {
+    return new LumianaBuffer(size);
+  }
+
+  static allocUnsafeSlow(size: number): LumianaBuffer {
     return new LumianaBuffer(size);
   }
 
@@ -330,10 +517,34 @@ export class LumianaBuffer extends Uint8Array {
   static override from<T>(elements: Iterable<T>, mapfn?: (v: T, k: number) => number, thisArg?: any): LumianaBuffer;
   static override from(data: any, _encodingOrMap?: any, _thisArg?: any): LumianaBuffer {
     if (typeof data === 'string') {
+      const enc = (typeof _encodingOrMap === 'string' ? _encodingOrMap : 'utf8').toLowerCase().replace('-', '');
+      if (enc === 'hex') {
+        const matches = data.match(/.{1,2}/g) || [];
+        return new LumianaBuffer(matches.map((byte: string) => parseInt(byte, 16)));
+      }
+      if (enc === 'base64' || enc === 'base64url') {
+        const binStr = typeof atob !== 'undefined' ? atob(data.replace(/-/g, '+').replace(/_/g, '/')) : '';
+        const len = binStr.length;
+        const bytes = new LumianaBuffer(len);
+        for (let i = 0; i < len; i++) {
+          bytes[i] = binStr.charCodeAt(i);
+        }
+        return bytes;
+      }
+      if (enc === 'ascii' || enc === 'latin1' || enc === 'binary') {
+        const bytes = new LumianaBuffer(data.length);
+        for (let i = 0; i < data.length; i++) {
+          bytes[i] = data.charCodeAt(i) & 0xff;
+        }
+        return bytes;
+      }
       return new LumianaBuffer(new TextEncoder().encode(data));
     }
     if (data instanceof Uint8Array) {
       return new LumianaBuffer(data.buffer as ArrayBuffer, data.byteOffset, data.byteLength);
+    }
+    if (data instanceof ArrayBuffer) {
+      return new LumianaBuffer(data, _encodingOrMap, _thisArg);
     }
     if (Array.isArray(data)) {
       return new LumianaBuffer(data);
@@ -345,6 +556,9 @@ export class LumianaBuffer extends Uint8Array {
 export { LumianaBuffer as Buffer };
 
 function getSyncHttpUrl(): string {
+  if (activeCredentials?.syncUrl) {
+    return activeCredentials.syncUrl;
+  }
   if (typeof location !== 'undefined') {
     return `${location.protocol}//${location.host}/__lumiana_sync_node__`;
   }
@@ -355,8 +569,13 @@ export function syncNodeCall(
   refId: string | null,
   path: string[],
   args: unknown[] | null,
-  isCall: boolean = true
+  isCall: boolean = true,
+  isConstructor: boolean = false
 ): unknown {
+  if (!lumiana.connected()) {
+    throw new Error('[Lumiana] No active connection. Call connect.credentials() before using Node modules.');
+  }
+
   if (typeof XMLHttpRequest === 'undefined') {
     throw new Error('[Lumiana Sync] XMLHttpRequest is not available in this environment.');
   }
@@ -374,7 +593,7 @@ export function syncNodeCall(
   }
 
   const marshalledArgs = args !== null ? args.map(marshallValue) : null;
-  const payload = JSON.stringify({ refId, path, args: marshalledArgs, isCall });
+  const payload = JSON.stringify({ refId, path, args: marshalledArgs, isCall, isConstructor });
 
   try {
     xhr.send(payload);
@@ -407,9 +626,13 @@ export function syncNodeCall(
   return unmarshallValue(data.result);
 }
 
+const globalLocalCallbacks = new Map<string, (...args: unknown[]) => unknown>();
+
 function marshallValue(value: unknown): unknown {
   if (typeof value === 'function') {
-    return { __lumiana_cb_warn__: 'Callback passed to sync call' };
+    const cbId = 'cb_' + Math.random().toString(36).slice(2) + Date.now().toString(36);
+    globalLocalCallbacks.set(cbId, value as (...args: unknown[]) => unknown);
+    return { __lumiana_cb__: cbId };
   }
   if (value instanceof Uint8Array) {
     return { __lumiana_bin__: Array.from(value) };
@@ -418,6 +641,21 @@ function marshallValue(value: unknown): unknown {
     return value.map(marshallValue);
   }
   if (value !== null && typeof value === 'object') {
+    if ((value as any).__lumiana_ref__) {
+      return { __lumiana_ref__: (value as any).__lumiana_ref__ };
+    }
+    if (typeof (value as any).fetch === 'function') {
+      const fetchCb = (value as any).fetch.bind(value);
+      const cbId = 'cb_' + Math.random().toString(36).slice(2) + Date.now().toString(36);
+      globalLocalCallbacks.set(cbId, fetchCb);
+      const obj: Record<string, unknown> = {
+        fetch: { __lumiana_cb__: cbId },
+      };
+      if (typeof (value as any).port === 'number') obj.port = (value as any).port;
+      if (typeof (value as any).hostname === 'string') obj.hostname = (value as any).hostname;
+      return obj;
+    }
+
     const proto = Object.getPrototypeOf(value);
     if (proto === null || proto === Object.prototype) {
       const obj: Record<string, unknown> = {};
@@ -469,10 +707,58 @@ function unmarshallValue(data: unknown): unknown {
   if (data === null || data === undefined) return data;
   if (typeof data === 'object') {
     if ((data as { __lumiana_ref__?: string }).__lumiana_ref__) {
-      return createNodeModuleProxy('ref', [], (data as { __lumiana_ref__: string }).__lumiana_ref__);
+      const refId = (data as { __lumiana_ref__: string }).__lumiana_ref__;
+      const staticProps: Record<string, unknown> = {};
+      if ((data as any).__props__ && typeof (data as any).__props__ === 'object') {
+        for (const [k, v] of Object.entries((data as any).__props__)) {
+          staticProps[k] = unmarshallValue(v);
+        }
+      }
+      return createNodeModuleProxy('ref', [], refId, staticProps);
     }
     if ((data as { __lumiana_bin__?: number[] }).__lumiana_bin__) {
       return LumianaBuffer.from((data as { __lumiana_bin__: number[] }).__lumiana_bin__);
+    }
+    if ((data as any)?.__lumiana_request__) {
+      const reqData = data as any;
+      const reqInit: RequestInit = {
+        method: reqData.method,
+        headers: reqData.headers,
+      };
+      const fullUrl = reqData.url.startsWith('http://') || reqData.url.startsWith('https://')
+        ? reqData.url
+        : `http://localhost${reqData.url.startsWith('/') ? '' : '/'}${reqData.url}`;
+      return new Request(fullUrl, reqInit);
+    }
+    if ((data as any)?.__lumiana_response__) {
+      const respData = data as any;
+      const isNullBodyStatus = [101, 204, 205, 304].includes(respData.status);
+      const bodyBuf = isNullBodyStatus || !respData.body
+        ? null
+        : (Array.isArray(respData.body) ? new Uint8Array(respData.body) : respData.body);
+      if (typeof Response !== 'undefined') {
+        return new Response(bodyBuf, {
+          status: respData.status,
+          statusText: respData.statusText,
+          headers: respData.headers,
+        });
+      }
+      return {
+        ok: respData.status >= 200 && respData.status < 300,
+        status: respData.status,
+        statusText: respData.statusText,
+        headers: typeof Headers !== 'undefined' ? new Headers(respData.headers) : respData.headers,
+        async text() {
+          return new TextDecoder().decode(bodyBuf || new Uint8Array());
+        },
+        async json() {
+          const t = new TextDecoder().decode(bodyBuf || new Uint8Array());
+          return JSON.parse(t);
+        },
+        async arrayBuffer() {
+          return (bodyBuf || new Uint8Array()).buffer;
+        },
+      };
     }
     if (Array.isArray(data)) {
       return data.map(unmarshallValue);
@@ -497,12 +783,13 @@ export function createNodeModuleProxy(
   return new Proxy(dummy, {
     get(_target, prop: string | symbol) {
       if (typeof prop === 'symbol') {
+        if (prop in _target) return (_target as any)[prop];
         if (prop === Symbol.toStringTag) return `[NodeModule ${moduleName}]`;
         if (prop === Symbol.toPrimitive) return () => `[NodeModule ${moduleName} ${path.join('.')}]`;
         return undefined;
       }
 
-      if (path.length === 1 && prop in staticValues) {
+      if (typeof prop === 'string' && prop in staticValues) {
         return staticValues[prop];
       }
 
@@ -523,6 +810,24 @@ export function createNodeModuleProxy(
       }
 
       return createNodeModuleProxy(moduleName, [...path, prop], refId, {});
+    },
+
+    set(_target, prop: string | symbol, val: any) {
+      if (typeof prop === 'string') {
+        staticValues[prop] = val;
+        if (refId) {
+          try {
+            syncNodeCall(refId, [prop], [val], true);
+          } catch {}
+        }
+      } else {
+        (_target as any)[prop] = val;
+      }
+      return true;
+    },
+
+    construct(_target, args: unknown[]): object {
+      return (syncNodeCall(refId, path, args, true, true) as object) || {};
     },
 
     apply(_target, _thisArg, args: unknown[]) {
@@ -547,6 +852,12 @@ interface ServerExecutionResponse {
 }
 
 function getInternalWsUrl(username: string, password: string): string {
+  if (activeCredentials?.url) {
+    const url = new URL(activeCredentials.url);
+    if (username && !url.searchParams.has('username')) url.searchParams.set('username', username);
+    if (password && !url.searchParams.has('password')) url.searchParams.set('password', password);
+    return url.toString();
+  }
   const proto = typeof location !== 'undefined' && location.protocol === 'https:' ? 'wss:' : 'ws:';
   const host = typeof location !== 'undefined' ? location.host : 'localhost:3883';
   return `${proto}//${host}/lumiana-ws?username=${encodeURIComponent(username)}&password=${encodeURIComponent(password)}`;
@@ -657,8 +968,182 @@ function createProcessObject(): any {
   return proc;
 }
 
+let activeSendNodeRequest: ((
+  path: string[],
+  args: unknown[] | null,
+  isCall: boolean,
+  refId?: string | null,
+  isConstructor?: boolean
+) => Promise<unknown>) | null = null;
+
+export async function lumianaSmartFetch(
+  input: RequestInfo | URL,
+  init?: RequestInit
+): Promise<Response> {
+  const originalFetch: typeof fetch | null =
+    (typeof window !== 'undefined' && (window as any).__lumiana_original_fetch__) ||
+    (typeof globalThis !== 'undefined' && (globalThis as any).__lumiana_original_fetch__) ||
+    (typeof globalThis !== 'undefined' && globalThis.fetch !== lumianaSmartFetch ? globalThis.fetch.bind(globalThis) : null);
+
+  let urlString: string;
+  if (typeof input === 'string') {
+    urlString = input;
+  } else if (typeof URL !== 'undefined' && input instanceof URL) {
+    urlString = input.href;
+  } else if (typeof Request !== 'undefined' && input instanceof Request) {
+    urlString = input.url;
+  } else {
+    urlString = String(input);
+  }
+
+  const isInternal =
+    urlString.startsWith('/') ||
+    urlString.startsWith('./') ||
+    urlString.startsWith('../') ||
+    urlString.startsWith('blob:') ||
+    urlString.startsWith('data:') ||
+    urlString.includes('/@vite/') ||
+    urlString.includes('/@fs/') ||
+    urlString.includes('/@id/') ||
+    urlString.startsWith('/__vite') ||
+    urlString.startsWith('/__lumiana') ||
+    (typeof location !== 'undefined' && (urlString.startsWith(location.origin) || urlString.startsWith(location.host)));
+
+  if (isInternal) {
+    if (originalFetch) {
+      return originalFetch(input, init);
+    }
+    throw new Error(`[Lumiana fetch] No browser fetch available for internal URL: ${urlString}`);
+  }
+
+  // External / Cross-Origin URL -> Requires active connection to Node.js!
+  if (!lumiana.connected()) {
+    throw new Error('[Lumiana] No active connection. Call connect.credentials() before fetching external resources.');
+  }
+
+  const method = (
+    init?.method ||
+    (typeof Request !== 'undefined' && input instanceof Request ? input.method : 'GET')
+  ).toUpperCase();
+
+  const headers: Record<string, string> = {};
+  if (typeof Request !== 'undefined' && input instanceof Request && input.headers) {
+    input.headers.forEach((value, key) => {
+      headers[key] = value;
+    });
+  }
+  if (init?.headers) {
+    if (typeof Headers !== 'undefined' && init.headers instanceof Headers) {
+      init.headers.forEach((value, key) => {
+        headers[key] = value;
+      });
+    } else if (Array.isArray(init.headers)) {
+      for (const [k, v] of init.headers) {
+        headers[k] = v;
+      }
+    } else if (typeof init.headers === 'object') {
+      Object.assign(headers, init.headers);
+    }
+  }
+
+  let body: any = init?.body;
+  if (body === undefined && typeof Request !== 'undefined' && input instanceof Request) {
+    if (method !== 'GET' && method !== 'HEAD' && !input.bodyUsed) {
+      try {
+        body = await input.arrayBuffer();
+      } catch {}
+    }
+  }
+
+  const nodeOptions: Record<string, any> = {
+    method,
+    headers,
+  };
+
+  if (method !== 'GET' && method !== 'HEAD' && body !== undefined && body !== null) {
+    if (typeof body === 'string') {
+      nodeOptions.body = body;
+    } else if (body instanceof ArrayBuffer) {
+      nodeOptions.body = { __lumiana_bin__: Array.from(new Uint8Array(body)) };
+    } else if (ArrayBuffer.isView(body)) {
+      nodeOptions.body = {
+        __lumiana_bin__: Array.from(new Uint8Array(body.buffer, body.byteOffset, body.byteLength)),
+      };
+    } else if (typeof Blob !== 'undefined' && body instanceof Blob) {
+      const ab = await body.arrayBuffer();
+      nodeOptions.body = { __lumiana_bin__: Array.from(new Uint8Array(ab)) };
+    } else if (typeof URLSearchParams !== 'undefined' && body instanceof URLSearchParams) {
+      nodeOptions.body = body.toString();
+      if (!headers['content-type'] && !headers['Content-Type']) {
+        headers['content-type'] = 'application/x-www-form-urlencoded;charset=UTF-8';
+      }
+    } else {
+      nodeOptions.body = body;
+    }
+  }
+
+  if (init?.redirect) {
+    nodeOptions.redirect = init.redirect;
+  }
+
+  // 1. If WebSocket RPC is connected, send through WebSocket
+  if (activeSendNodeRequest) {
+    const res = await activeSendNodeRequest(['fetch'], [urlString, nodeOptions], true);
+    return res as Response;
+  }
+
+  // 2. Fallback to HTTP RPC endpoint
+  if (originalFetch) {
+    const rpcUrl = getSyncHttpUrl();
+    const authHeaders: Record<string, string> = {
+      'Content-Type': 'application/json',
+    };
+    if (activeCredentials?.username || activeCredentials?.password) {
+      const user = activeCredentials.username || '';
+      const pass = activeCredentials.password || '';
+      const token =
+        typeof btoa !== 'undefined'
+          ? btoa(`${user}:${pass}`)
+          : LumianaBuffer.from(`${user}:${pass}`).toString('base64');
+      authHeaders['Authorization'] = `Basic ${token}`;
+      authHeaders['x-lumiana-auth'] = token;
+    }
+
+    const rpcPayload = JSON.stringify({
+      refId: null,
+      path: ['fetch'],
+      args: [urlString, nodeOptions],
+      isCall: true,
+      isConstructor: false,
+    });
+
+    const httpRes = await originalFetch(rpcUrl, {
+      method: 'POST',
+      headers: authHeaders,
+      body: rpcPayload,
+    });
+
+    if (!httpRes.ok) {
+      throw new Error(`[Lumiana fetch] HTTP RPC error: status ${httpRes.status}`);
+    }
+
+    const data: any = await httpRes.json();
+    if (!data.ok) {
+      throw new Error(data.error?.message || data.error || '[Lumiana fetch] Node fetch call failed');
+    }
+
+    return unmarshallValue(data.result) as Response;
+  }
+
+  throw new Error('[Lumiana fetch] No transport available to send fetch to Node');
+}
+
 export function setupBrowserEnvironment(): void {
   if (typeof window !== 'undefined') {
+    if (!(window as any).__lumiana_original_fetch__ && typeof window.fetch === 'function') {
+      (window as any).__lumiana_original_fetch__ = window.fetch.bind(window);
+    }
+    (window as any).fetch = lumianaSmartFetch;
     (window as any).global = window;
     (window as any).Buffer = LumianaBuffer;
     (window as any).process = createProcessObject();
@@ -666,7 +1151,12 @@ export function setupBrowserEnvironment(): void {
       (window as any).setImmediate = (fn: any, ...args: any[]) => setTimeout(fn, 0, ...args);
       (window as any).clearImmediate = (id: any) => clearTimeout(id);
     }
-  } else if (typeof globalThis !== 'undefined') {
+  }
+  if (typeof globalThis !== 'undefined') {
+    if (!(globalThis as any).__lumiana_original_fetch__ && typeof globalThis.fetch === 'function' && globalThis.fetch !== lumianaSmartFetch) {
+      (globalThis as any).__lumiana_original_fetch__ = globalThis.fetch.bind(globalThis);
+    }
+    (globalThis as any).fetch = lumianaSmartFetch;
     (globalThis as any).global = globalThis;
     (globalThis as any).Buffer = LumianaBuffer;
     (globalThis as any).process = createProcessObject();
@@ -674,6 +1164,7 @@ export function setupBrowserEnvironment(): void {
 }
 
 async function baseConnect(creds?: Credentials): Promise<LumianaClient> {
+  setupBrowserEnvironment();
   if (creds) {
     activeCredentials = creds;
   }
@@ -688,12 +1179,12 @@ async function baseConnect(creds?: Credentials): Promise<LumianaClient> {
     const listeners = new Set<(data: Uint8Array) => void>();
     const pendingPings = new Map<number, (res: PingResult) => void>();
     const pendingRequests = new Map<string, { resolve: (val: unknown) => void; reject: (err: Error) => void }>();
-    const localCallbacks = new Map<string, (...args: unknown[]) => unknown>();
+    const localCallbacks = globalLocalCallbacks;
 
     function marshall(value: unknown): unknown {
       if (typeof value === 'function') {
         const cbId = 'cb_' + Math.random().toString(36).slice(2) + Date.now().toString(36);
-        localCallbacks.set(cbId, value as (...args: unknown[]) => unknown);
+        globalLocalCallbacks.set(cbId, value as (...args: unknown[]) => unknown);
         return { __lumiana_cb__: cbId };
       }
       if (value instanceof Uint8Array) {
@@ -703,6 +1194,21 @@ async function baseConnect(creds?: Credentials): Promise<LumianaClient> {
         return value.map(marshall);
       }
       if (value !== null && typeof value === 'object') {
+        if ((value as any).__lumiana_ref__) {
+          return { __lumiana_ref__: (value as any).__lumiana_ref__ };
+        }
+        if (typeof (value as any).fetch === 'function') {
+          const fetchCb = (value as any).fetch.bind(value);
+          const cbId = 'cb_' + Math.random().toString(36).slice(2) + Date.now().toString(36);
+          globalLocalCallbacks.set(cbId, fetchCb);
+          const obj: Record<string, unknown> = {
+            fetch: { __lumiana_cb__: cbId },
+          };
+          if (typeof (value as any).port === 'number') obj.port = (value as any).port;
+          if (typeof (value as any).hostname === 'string') obj.hostname = (value as any).hostname;
+          return obj;
+        }
+
         const proto = Object.getPrototypeOf(value);
         if (proto === null || proto === Object.prototype) {
           const obj: Record<string, unknown> = {};
@@ -719,10 +1225,58 @@ async function baseConnect(creds?: Credentials): Promise<LumianaClient> {
       if (data === null || data === undefined) return data;
       if (typeof data === 'object') {
         if ((data as { __lumiana_ref__?: string }).__lumiana_ref__) {
-          return createNodeProxy([], (data as { __lumiana_ref__: string }).__lumiana_ref__);
+          const refId = (data as { __lumiana_ref__: string }).__lumiana_ref__;
+          const staticProps: Record<string, unknown> = {};
+          if ((data as any).__props__ && typeof (data as any).__props__ === 'object') {
+            for (const [k, v] of Object.entries((data as any).__props__)) {
+              staticProps[k] = unmarshall(v);
+            }
+          }
+          return createNodeProxy([], refId, staticProps);
         }
         if ((data as { __lumiana_bin__?: number[] }).__lumiana_bin__) {
           return LumianaBuffer.from((data as { __lumiana_bin__: number[] }).__lumiana_bin__);
+        }
+        if ((data as any)?.__lumiana_request__) {
+          const reqData = data as any;
+          const reqInit: RequestInit = {
+            method: reqData.method,
+            headers: reqData.headers,
+          };
+          const fullUrl = reqData.url.startsWith('http://') || reqData.url.startsWith('https://')
+            ? reqData.url
+            : `http://localhost${reqData.url.startsWith('/') ? '' : '/'}${reqData.url}`;
+          return new Request(fullUrl, reqInit);
+        }
+        if ((data as any)?.__lumiana_response__) {
+          const respData = data as any;
+          const isNullBodyStatus = [101, 204, 205, 304].includes(respData.status);
+          const bodyBuf = isNullBodyStatus || !respData.body
+            ? null
+            : (Array.isArray(respData.body) ? new Uint8Array(respData.body) : respData.body);
+          if (typeof Response !== 'undefined') {
+            return new Response(bodyBuf, {
+              status: respData.status,
+              statusText: respData.statusText,
+              headers: respData.headers,
+            });
+          }
+          return {
+            ok: respData.status >= 200 && respData.status < 300,
+            status: respData.status,
+            statusText: respData.statusText,
+            headers: typeof Headers !== 'undefined' ? new Headers(respData.headers) : respData.headers,
+            async text() {
+              return new TextDecoder().decode(bodyBuf || new Uint8Array());
+            },
+            async json() {
+              const t = new TextDecoder().decode(bodyBuf || new Uint8Array());
+              return JSON.parse(t);
+            },
+            async arrayBuffer() {
+              return (bodyBuf || new Uint8Array()).buffer;
+            },
+          };
         }
         if (Array.isArray(data)) {
           return data.map(unmarshall);
@@ -737,17 +1291,33 @@ async function baseConnect(creds?: Credentials): Promise<LumianaClient> {
     }
 
     ws.onopen = () => {
+      activeConnection = {
+        ws,
+        pendingRequests,
+        pendingPings,
+        sendNodeRequest,
+      };
+      activeSendNodeRequest = sendNodeRequest;
       resolve(lumiana);
     };
 
     ws.onerror = (err) => {
+      if (activeConnection?.ws === ws) {
+        activeConnection = null;
+        activeSendNodeRequest = null;
+      }
       reject(err);
     };
 
     ws.onclose = () => {
+      if (activeConnection?.ws === ws) {
+        activeConnection = null;
+        activeSendNodeRequest = null;
+      }
       localCallbacks.clear();
       pendingRequests.forEach(({ reject }) => reject(new Error('[Lumiana] WebSocket closed')));
       pendingRequests.clear();
+      pendingPings.clear();
     };
 
     ws.onmessage = (event) => {
@@ -806,11 +1376,53 @@ async function baseConnect(creds?: Credentials): Promise<LumianaClient> {
         const text = new TextDecoder().decode(data.subarray(1));
         try {
           const msg = JSON.parse(text);
-          const cb = localCallbacks.get(msg.cbId);
+          const cb = localCallbacks.get(msg.cbId) || globalLocalCallbacks.get(msg.cbId);
           if (cb) {
+            const isSyncCb = globalLocalCallbacks.has(msg.cbId);
             const rawArgs = Array.isArray(msg.args) ? msg.args : [];
-            const args = rawArgs.map(unmarshall);
-            cb(...args);
+            const args = rawArgs.map(isSyncCb ? unmarshallValue : unmarshall);
+            Promise.resolve(cb(...args))
+              .then(async (res) => {
+                if (msg.callId) {
+                  let marshalledResult: unknown;
+                  if (typeof Response !== 'undefined' && res instanceof Response) {
+                    const headers: Record<string, string> = {};
+                    res.headers.forEach((v: string, k: string) => {
+                      headers[k] = v;
+                    });
+                    const bodyText = await res.text();
+                    marshalledResult = {
+                      __lumiana_response__: true,
+                      status: res.status,
+                      statusText: res.statusText,
+                      headers,
+                      body: bodyText,
+                    };
+                  } else {
+                    marshalledResult = marshall(res);
+                  }
+                  const payload = JSON.stringify({ callId: msg.callId, ok: true, result: marshalledResult });
+                  const encoded = new TextEncoder().encode(payload);
+                  const packet = new Uint8Array(1 + encoded.length);
+                  packet[0] = 0x08; // CALLBACK_RESPONSE
+                  packet.set(encoded, 1);
+                  ws.send(packet);
+                }
+              })
+              .catch((err) => {
+                if (msg.callId) {
+                  const payload = JSON.stringify({
+                    callId: msg.callId,
+                    ok: false,
+                    error: err instanceof Error ? err.message : String(err),
+                  });
+                  const encoded = new TextEncoder().encode(payload);
+                  const packet = new Uint8Array(1 + encoded.length);
+                  packet[0] = 0x08;
+                  packet.set(encoded, 1);
+                  ws.send(packet);
+                }
+              });
           }
         } catch (err) {
           console.error('[Lumiana] Failed to invoke callback:', err);
@@ -827,7 +1439,8 @@ async function baseConnect(creds?: Credentials): Promise<LumianaClient> {
       path: string[],
       args: unknown[] | null,
       isCall: boolean,
-      refId?: string | null
+      refId?: string | null,
+      isConstructor: boolean = false
     ): Promise<unknown> {
       return new Promise<unknown>((res, rej) => {
         if (ws.readyState !== WebSocket.OPEN) {
@@ -843,6 +1456,7 @@ async function baseConnect(creds?: Credentials): Promise<LumianaClient> {
           path,
           args: marshalledArgs,
           isCall,
+          isConstructor,
           module: path[0],
           method: path[1],
         });
@@ -854,15 +1468,24 @@ async function baseConnect(creds?: Credentials): Promise<LumianaClient> {
       });
     }
 
-    function createNodeProxy(path: string[] = [], refId: string | null = null): LumianaNodeProxy {
+    function createNodeProxy(
+      path: string[] = [],
+      refId: string | null = null,
+      staticValues: Record<string, unknown> = {}
+    ): LumianaNodeProxy {
       const dummy = function () {};
 
       return new Proxy(dummy, {
         get(_target, prop: string | symbol) {
           if (typeof prop === 'symbol') {
+            if (prop in _target) return (_target as any)[prop];
             if (prop === Symbol.toStringTag) return 'LumianaNodeProxy';
             if (prop === Symbol.toPrimitive) return () => `[LumianaNodeProxy ${refId ? `ref:${refId}` : ''} ${path.join('.')}]`;
             return undefined;
+          }
+
+          if (typeof prop === 'string' && prop in staticValues) {
+            return staticValues[prop];
           }
 
           if (prop === 'then') {
@@ -889,124 +1512,98 @@ async function baseConnect(creds?: Credentials): Promise<LumianaClient> {
           return createNodeProxy([...path, prop], refId);
         },
 
+        set(_target, prop: string | symbol, val: any) {
+          if (typeof prop === 'string') {
+            staticValues[prop] = val;
+            if (refId) {
+              sendNodeRequest([prop], [val], true, refId).catch(() => {});
+            }
+          } else {
+            (_target as any)[prop] = val;
+          }
+          return true;
+        },
+
+        construct(_target, args: unknown[]) {
+          return sendNodeRequest(path, args, true, refId, true);
+        },
+
         apply(_target, _thisArg, args: unknown[]) {
           return sendNodeRequest(path, args, true, refId);
         },
       }) as unknown as LumianaNodeProxy;
     }
 
-    const nodeProxy = createNodeProxy([], null) as unknown as LumianaNode;
-
-    const lumiana: LumianaClient = {
-      ws,
-      node: nodeProxy,
-
-      ping(): Promise<PingResult> {
-        return new Promise((res, rej) => {
-          if (ws.readyState !== WebSocket.OPEN) {
-            return rej(new Error('[Lumiana] WebSocket is not open'));
-          }
-
-          const now = Date.now();
-          const buffer = new Uint8Array(9);
-          const view = new DataView(buffer.buffer);
-          buffer[0] = 0x01; // PING opcode
-          view.setBigUint64(1, BigInt(now));
-
-          pendingPings.set(now, res);
-
-          setTimeout(() => {
-            if (pendingPings.has(now)) {
-              pendingPings.delete(now);
-              rej(new Error('[Lumiana] Ping timeout'));
-            }
-          }, 5000);
-
-          ws.send(buffer);
-        });
-      },
-
-      run<T = unknown>(
-        fn: string | (() => Promise<T> | T) | ((ctx: LumianaRunContext, ...args: any[]) => Promise<T> | T),
-        ...args: any[]
-      ): any {
-        setupBrowserEnvironment();
-
-        if (typeof fn === 'function' && fn.length === 0 && args.length === 0) {
-          return (fn as () => any)();
-        }
-
-        return new Promise<T>((res, rej) => {
-          if (ws.readyState !== WebSocket.OPEN) {
-            return rej(new Error('[Lumiana] WebSocket is not open'));
-          }
-          const id = Math.random().toString(36).slice(2) + Date.now().toString(36);
-          const code = typeof fn === 'function' ? fn.toString() : String(fn);
-
-          pendingRequests.set(id, { resolve: res as (val: unknown) => void, reject: rej });
-
-          const payload = JSON.stringify({ id, code, args });
-          const encoded = new TextEncoder().encode(payload);
-          const packet = new Uint8Array(1 + encoded.length);
-          packet[0] = 0x03; // RUN_FUNCTION
-          packet.set(encoded, 1);
-
-          ws.send(packet);
-        });
-      },
-
-      send(data: Uint8Array): void {
-        if (ws.readyState === WebSocket.OPEN) {
-          ws.send(data);
-        }
-      },
-
-      onMessage(callback: (data: Uint8Array) => void): () => void {
-        listeners.add(callback);
-        return () => listeners.delete(callback);
-      },
-
-      close(): void {
-        ws.close();
-      },
-    };
   });
 }
 
-export interface ConnectFunction {
-  (creds?: Credentials): Promise<LumianaClient>;
-  credentials(creds: Credentials): Promise<LumianaClient>;
-}
+export const lumiana: Lumiana = {
+  connected(): boolean {
+    return activeConnection !== null && activeConnection.ws.readyState === WebSocket.OPEN;
+  },
 
-export const connect: ConnectFunction = Object.assign(
-  (creds?: Credentials) => baseConnect(creds),
-  {
-    credentials(creds: Credentials): Promise<LumianaClient> {
-      return baseConnect(creds);
-    },
-  }
-);
+  disconnect(): void {
+    if (activeConnection) {
+      try {
+        activeConnection.ws.close();
+      } catch {}
+      activeConnection.pendingRequests.forEach(({ reject }) =>
+        reject(new Error('[Lumiana] Connection disconnected'))
+      );
+      activeConnection.pendingRequests.clear();
+      activeConnection.pendingPings.clear();
+      activeConnection = null;
+    }
+    activeSendNodeRequest = null;
+    globalLocalCallbacks.clear();
+  },
 
-export function run<T = unknown>(bootstrap: () => Promise<T> | T): Promise<T> | T {
-  setupBrowserEnvironment();
-  return bootstrap();
-}
+  ping(): Promise<PingResult> {
+    if (!lumiana.connected() || !activeConnection) {
+      return Promise.reject(new Error('[Lumiana] No active connection. Call connect.credentials() first.'));
+    }
+    return new Promise<PingResult>((resolve, reject) => {
+      if (!activeConnection || activeConnection.ws.readyState !== WebSocket.OPEN) {
+        return reject(new Error('[Lumiana] No active connection. Call connect.credentials() first.'));
+      }
+      const clientTimestamp = Date.now();
+      activeConnection.pendingPings.set(clientTimestamp, resolve);
 
-export interface LumianaApp {
-  connect: ConnectFunction;
-  run: typeof run;
-  createNodeModuleProxy: typeof createNodeModuleProxy;
-  syncNodeCall: typeof syncNodeCall;
-  Buffer: typeof LumianaBuffer;
-}
+      const packet = new Uint8Array(9);
+      packet[0] = 0x01; // PING opcode
+      const view = new DataView(packet.buffer);
+      view.setBigUint64(1, BigInt(clientTimestamp));
+      activeConnection.ws.send(packet);
 
-export const lumiana: LumianaApp = {
-  connect,
-  run,
-  createNodeModuleProxy,
-  syncNodeCall,
-  Buffer: LumianaBuffer,
+      setTimeout(() => {
+        if (activeConnection?.pendingPings.has(clientTimestamp)) {
+          activeConnection.pendingPings.delete(clientTimestamp);
+          reject(new Error('[Lumiana] Ping timeout'));
+        }
+      }, 5000);
+    });
+  },
 };
 
+export const connect: ConnectAPI = {
+  async credentials(creds: Credentials): Promise<Lumiana> {
+    if (lumiana.connected() || activeConnection) {
+      throw new Error('[Lumiana] Connection already active. Call lumiana.disconnect() before connecting again.');
+    }
+    if (isConnecting) {
+      throw new Error('[Lumiana] Connection is already in progress.');
+    }
+
+    isConnecting = true;
+    try {
+      await baseConnect(creds);
+      return lumiana;
+    } finally {
+      isConnecting = false;
+    }
+  },
+};
+
+export { lumianaSmartFetch as fetch };
 export default connect;
 

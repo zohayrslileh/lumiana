@@ -9,11 +9,15 @@
     "preview": "vite preview"
   },
   "devDependencies": {
+    "@types/express": "^5.0.6",
     "typescript": "~6.0.2",
     "vite": "^8.2.2"
   },
   "dependencies": {
+    "@hono/node-server": "^2.1.1",
     "@types/node": "^26.4.1",
+    "express": "^5.2.1",
+    "hono": "^4.13.7",
     "lumiana": "^0.2.2"
   }
 }
