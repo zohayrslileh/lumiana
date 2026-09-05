@@ -16,8 +16,10 @@
   "dependencies": {
     "@hono/node-server": "^2.1.1",
     "@types/node": "^26.4.1",
+    "chokidar": "^5.0.0",
     "express": "^5.2.1",
     "hono": "^4.13.7",
-    "lumiana": "^0.2.2"
+    "lumiana": "^0.2.2",
+    "systeminformation": "^5.33.8"
   }
 }

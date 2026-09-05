@@ -19,6 +19,7 @@ import {
   IN_MEMORY_STRING_DECODER_CODE,
   IN_MEMORY_PERF_HOOKS_CODE,
 } from './in-memory-modules.js';
+import { lumianaEncode, lumianaDecode } from './codec.js';
 
 export interface LumianaPluginOptions {
   /**
@@ -548,20 +549,39 @@ async function handleSyncHttpRequest(req, res, expectedUser, expectedPass) {
     res.end();
     return;
   }
+  const contentType = (req.headers["content-type"] || "").toLowerCase();
+  const isMsgPack = contentType.includes("msgpack");
+
   if (expectedUser && expectedPass && !verifyAuth(req, expectedUser, expectedPass)) {
-    res.setHeader("Content-Type", "application/json");
-    res.setHeader("Access-Control-Allow-Origin", "*");
-    res.writeHead(401);
-    res.end(JSON.stringify({ ok: false, error: { message: "Unauthorized: invalid credentials" } }));
+    if (isMsgPack) {
+      const payload = lumianaEncode({ ok: false, error: { message: "Unauthorized: invalid credentials" } });
+      res.setHeader("Content-Type", "application/msgpack");
+      res.setHeader("Access-Control-Allow-Origin", "*");
+      res.writeHead(401);
+      res.end(Buffer.from(payload));
+    } else {
+      res.setHeader("Content-Type", "application/json");
+      res.setHeader("Access-Control-Allow-Origin", "*");
+      res.writeHead(401);
+      res.end(JSON.stringify({ ok: false, error: { message: "Unauthorized: invalid credentials" } }));
+    }
     return;
   }
-  let body = "";
+
+  const chunks = [];
   req.on("data", (chunk) => {
-    body += chunk;
+    chunks.push(typeof chunk === "string" ? Buffer.from(chunk) : chunk);
   });
   req.on("end", async () => {
+    const rawBody = Buffer.concat(chunks);
     try {
-      const parsed = JSON.parse(body || "{}");
+      let parsed;
+      if (isMsgPack) {
+        parsed = rawBody.length > 0 ? lumianaDecode(rawBody) : {};
+      } else {
+        parsed = JSON.parse(rawBody.toString("utf8") || "{}");
+      }
+
       const targetWorker = latestActiveWorker;
       if (!targetWorker) {
         throw new Error("No active Lumiana connection/worker available for sync RPC");
@@ -590,24 +610,47 @@ async function handleSyncHttpRequest(req, res, expectedUser, expectedPass) {
         });
       });
 
-      res.setHeader("Content-Type", "application/json");
-      res.setHeader("Access-Control-Allow-Origin", "*");
-      res.writeHead(200);
-      res.end(JSON.stringify({ ok: resMsg.ok, result: resMsg.result, error: resMsg.error }));
+      if (isMsgPack) {
+        const payload = lumianaEncode({ ok: resMsg.ok, result: resMsg.result, error: resMsg.error });
+        res.setHeader("Content-Type", "application/msgpack");
+        res.setHeader("Access-Control-Allow-Origin", "*");
+        res.writeHead(200);
+        res.end(Buffer.from(payload));
+      } else {
+        res.setHeader("Content-Type", "application/json");
+        res.setHeader("Access-Control-Allow-Origin", "*");
+        res.writeHead(200);
+        res.end(JSON.stringify({ ok: resMsg.ok, result: resMsg.result, error: resMsg.error }));
+      }
     } catch (err) {
-      res.setHeader("Content-Type", "application/json");
-      res.setHeader("Access-Control-Allow-Origin", "*");
-      res.writeHead(200);
-      res.end(
-        JSON.stringify({
+      if (isMsgPack) {
+        const payload = lumianaEncode({
           ok: false,
           error: {
             message: err?.message || String(err),
             code: err?.code,
             stack: err?.stack,
           },
-        })
-      );
+        });
+        res.setHeader("Content-Type", "application/msgpack");
+        res.setHeader("Access-Control-Allow-Origin", "*");
+        res.writeHead(200);
+        res.end(Buffer.from(payload));
+      } else {
+        res.setHeader("Content-Type", "application/json");
+        res.setHeader("Access-Control-Allow-Origin", "*");
+        res.writeHead(200);
+        res.end(
+          JSON.stringify({
+            ok: false,
+            error: {
+              message: err?.message || String(err),
+              code: err?.code,
+              stack: err?.stack,
+            },
+          })
+        );
+      }
     }
   });
 }
@@ -1281,5 +1324,7 @@ server.listen(PORT, () => {
 var src_default = lumiana;
 export {
   src_default as default,
-  lumiana
+  lumiana,
+  lumianaEncode,
+  lumianaDecode,
 };

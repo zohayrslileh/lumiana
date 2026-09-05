@@ -3,6 +3,7 @@ import { parentPort, workerData } from 'node:worker_threads';
 import path from 'node:path';
 import { createRequire } from 'node:module';
 import { pathToFileURL } from 'node:url';
+import { lumianaEncode, lumianaDecode } from './codec.js';
 
 if (!parentPort) {
   throw new Error('[Lumiana Worker] This file must be executed inside a worker thread.');
@@ -31,8 +32,8 @@ function sendLogToClient(level: string, args: any[]) {
         return String(a);
       }
     });
-    const payload = JSON.stringify({ level, args: marshalled });
-    const packet = Buffer.concat([Buffer.from([0x0B]), Buffer.from(payload, 'utf-8')]);
+    const payload = lumianaEncode({ level, args: marshalled });
+    const packet = Buffer.concat([Buffer.from([0x0B]), Buffer.from(payload)]);
     parentPort?.postMessage({ type: 'WS_SEND', data: packet });
   } catch {}
 }
@@ -69,8 +70,8 @@ function sendFatalErrorToClient(err: any) {
       path: err?.path,
       spawnargs: err?.spawnargs,
     };
-    const payload = JSON.stringify(errorInfo);
-    const packet = Buffer.concat([Buffer.from([0x0C]), Buffer.from(payload, 'utf-8')]);
+    const payload = lumianaEncode(errorInfo);
+    const packet = Buffer.concat([Buffer.from([0x0C]), Buffer.from(payload)]);
     parentPort?.postMessage({ type: 'WS_SEND', data: packet });
   } catch {}
 }
@@ -90,7 +91,7 @@ function serializeForClient(value: any, livingObjects: Map<string, any>, seen = 
   const t = typeof value;
   if (t === 'string' || t === 'number' || t === 'boolean' || t === 'bigint' || t === 'symbol') return value;
   if (value instanceof Uint8Array || Buffer.isBuffer(value)) {
-    return { __lumiana_bin64__: Buffer.from(value).toString('base64') };
+    return new Uint8Array(value.buffer, value.byteOffset, value.byteLength);
   }
   if (value instanceof Error) {
     return { name: value.name, message: value.message, stack: value.stack, code: (value as any).code };
@@ -204,6 +205,9 @@ async function serializeForClientAsync(value: any, livingObjects: Map<string, an
 function unmarshallArgs(args: any[], livingObjects: Map<string, any>): any[] {
   return args.map((arg) => {
     if (arg === null || arg === undefined) return arg;
+    if (arg instanceof Uint8Array || Buffer.isBuffer(arg)) {
+      return Buffer.from(arg.buffer, arg.byteOffset, arg.byteLength);
+    }
     if (typeof arg === 'object') {
       if (arg.__lumiana_cb__) {
         const cbId = arg.__lumiana_cb__;
@@ -213,7 +217,7 @@ function unmarshallArgs(args: any[], livingObjects: Map<string, any>): any[] {
             const serializedCbArgs = await Promise.all(
               cbArgs.map((a) => serializeForClientAsync(a, livingObjects))
             );
-            const payload = JSON.stringify({ callId, cbId, args: serializedCbArgs });
+            const payload = lumianaEncode({ callId, cbId, args: serializedCbArgs });
             const packet = Buffer.concat([Buffer.from([0x07]), Buffer.from(payload)]);
 
             const resPromise = new Promise((resolve, reject) => {
@@ -547,11 +551,20 @@ parentPort.on('message', async (msg: any) => {
       return;
     }
 
+    function parseClientPayload(raw: Buffer | Uint8Array): any {
+      try {
+        return lumianaDecode(raw);
+      } catch {
+        const text = new TextDecoder().decode(raw);
+        return JSON.parse(text);
+      }
+    }
+
     // 0x03 = RUN_FUNCTION
     if (opcode === 0x03) {
+      let req: any;
       try {
-        const text = new TextDecoder().decode(data.subarray(1));
-        const req = JSON.parse(text);
+        req = parseClientPayload(data.subarray(1));
 
         const ctx = {
           os: await import('node:os'),
@@ -570,15 +583,13 @@ parentPort.on('message', async (msg: any) => {
         }
         const rawResult = await fn(ctx, ...(req.args || []));
         const result = await serializeForClientAsync(rawResult, livingObjects);
-        const resPayload = JSON.stringify({ id: req.id, ok: true, result });
+        const resPayload = lumianaEncode({ id: req.id, ok: true, result });
         const resPacket = Buffer.concat([Buffer.from([0x04]), Buffer.from(resPayload)]);
         parentPort.postMessage({ type: 'WS_SEND', data: resPacket });
       } catch (err: any) {
         try {
-          const text = new TextDecoder().decode(data.subarray(1));
-          const req = JSON.parse(text);
           const errorMsg = err instanceof Error ? err.message : String(err);
-          const resPayload = JSON.stringify({ id: req.id, ok: false, error: errorMsg });
+          const resPayload = lumianaEncode({ id: req?.id, ok: false, error: errorMsg });
           const resPacket = Buffer.concat([Buffer.from([0x04]), Buffer.from(resPayload)]);
           parentPort.postMessage({ type: 'WS_SEND', data: resPacket });
         } catch {}
@@ -588,9 +599,9 @@ parentPort.on('message', async (msg: any) => {
 
     // 0x05 = NODE_CALL
     if (opcode === 0x05) {
+      let req: any;
       try {
-        const text = new TextDecoder().decode(data.subarray(1));
-        const req = JSON.parse(text);
+        req = parseClientPayload(data.subarray(1));
 
         const refId = req.refId || null;
         const pathSegments = Array.isArray(req.path)
@@ -613,16 +624,14 @@ parentPort.on('message', async (msg: any) => {
           isConstructor
         );
         const result = await serializeForClientAsync(rawResult, livingObjects);
-        const resPayload = JSON.stringify({ id: req.id, ok: true, result });
+        const resPayload = lumianaEncode({ id: req.id, ok: true, result });
         const resPacket = Buffer.concat([Buffer.from([0x06]), Buffer.from(resPayload)]);
         parentPort.postMessage({ type: 'WS_SEND', data: resPacket });
       } catch (err: any) {
         try {
-          const text = new TextDecoder().decode(data.subarray(1));
-          const req = JSON.parse(text);
           const errorMsg = err instanceof Error ? err.message : String(err);
-          const resPayload = JSON.stringify({
-            id: req.id,
+          const resPayload = lumianaEncode({
+            id: req?.id,
             ok: false,
             error: errorMsg,
             code: err?.code,
@@ -638,8 +647,7 @@ parentPort.on('message', async (msg: any) => {
     // 0x08 = CALLBACK_RESPONSE
     if (opcode === 0x08) {
       try {
-        const text = new TextDecoder().decode(data.subarray(1));
-        const msg = JSON.parse(text);
+        const msg = parseClientPayload(data.subarray(1));
         const pending = pendingCallbacks.get(msg.callId);
         if (pending) {
           pendingCallbacks.delete(msg.callId);

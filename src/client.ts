@@ -1,3 +1,5 @@
+import { lumianaEncode, lumianaDecode } from './codec.js';
+
 export interface PingResult {
   readonly ok: boolean;
   readonly latency: number;
@@ -510,6 +512,8 @@ export class LumianaBuffer extends Uint8Array {
     return result;
   }
 
+  static override from(buffer: ArrayBuffer | SharedArrayBuffer, byteOffset?: number, length?: number): LumianaBuffer;
+  static override from(buffer: Uint8Array): LumianaBuffer;
   static override from(str: string, encoding?: string): LumianaBuffer;
   static override from(arrayLike: ArrayLike<number>): LumianaBuffer;
   static override from<T>(arrayLike: ArrayLike<T>, mapfn: (v: T, k: number) => number, thisArg?: any): LumianaBuffer;
@@ -583,7 +587,11 @@ export function syncNodeCall(
 
   const xhr = new XMLHttpRequest();
   xhr.open('POST', getSyncHttpUrl(), false); // Synchronous execution!
-  xhr.setRequestHeader('Content-Type', 'application/json');
+  xhr.setRequestHeader('Content-Type', 'application/msgpack');
+  xhr.setRequestHeader('Accept', 'application/msgpack, application/json;q=0.9, */*;q=0.8');
+  try {
+    xhr.overrideMimeType('text/plain; charset=x-user-defined');
+  } catch {}
 
   if (activeCredentials?.username || activeCredentials?.password) {
     const user = activeCredentials.username || '';
@@ -594,10 +602,10 @@ export function syncNodeCall(
   }
 
   const marshalledArgs = args !== null ? args.map(marshallValue) : null;
-  const payload = JSON.stringify({ refId, path, args: marshalledArgs, isCall, isConstructor, isSet });
+  const payload = lumianaEncode({ refId, path, args: marshalledArgs, isCall, isConstructor, isSet });
 
   try {
-    xhr.send(payload);
+    xhr.send(payload as any);
   } catch (netErr: any) {
     throw new Error(`[Lumiana Sync] Network error connecting to ${getSyncHttpUrl()}: ${netErr?.message || netErr}`);
   }
@@ -607,14 +615,38 @@ export function syncNodeCall(
   }
 
   if (xhr.status !== 200) {
-    throw new Error(`[Lumiana Sync] Call failed with status ${xhr.status}: ${xhr.responseText}`);
+    let errDetail = '';
+    try {
+      errDetail = xhr.responseText || String(xhr.status);
+    } catch {
+      errDetail = String(xhr.status);
+    }
+    throw new Error(`[Lumiana Sync] Call failed with status ${xhr.status}: ${errDetail}`);
   }
 
   let data: any;
   try {
-    data = JSON.parse(xhr.responseText);
-  } catch (jsonErr) {
-    throw new Error(`[Lumiana Sync] Failed to parse response JSON: ${xhr.responseText}`);
+    if (typeof ArrayBuffer !== 'undefined' && xhr.response instanceof ArrayBuffer) {
+      data = lumianaDecode(new Uint8Array(xhr.response));
+    } else {
+      const respText = xhr.responseText || '';
+      try {
+        const bytes = new Uint8Array(respText.length);
+        for (let i = 0; i < respText.length; i++) {
+          bytes[i] = respText.charCodeAt(i) & 0xff;
+        }
+        data = lumianaDecode(bytes);
+      } catch {
+        data = JSON.parse(respText);
+      }
+    }
+  } catch (parseErr) {
+    try {
+      const text = typeof xhr.response === 'string' ? xhr.response : (xhr.responseText || '');
+      data = JSON.parse(text);
+    } catch {
+      throw new Error(`[Lumiana Sync] Failed to parse response: ${parseErr}`);
+    }
   }
 
   if (!data.ok) {
@@ -643,15 +675,8 @@ function marshallValue(value: unknown): unknown {
     globalLocalCallbacks.set(cbId, value as (...args: unknown[]) => unknown);
     return { __lumiana_cb__: cbId };
   }
-  if (value instanceof Uint8Array) {
-    let binary = '';
-    const len = value.length;
-    const CHUNK_SIZE = 0x8000;
-    for (let i = 0; i < len; i += CHUNK_SIZE) {
-      binary += String.fromCharCode.apply(null, value.subarray(i, Math.min(i + CHUNK_SIZE, len)) as any);
-    }
-    const b64 = typeof btoa !== 'undefined' ? btoa(binary) : Buffer.from(value).toString('base64');
-    return { __lumiana_bin64__: b64 };
+  if (value instanceof Uint8Array || (typeof Buffer !== 'undefined' && Buffer.isBuffer(value))) {
+    return new Uint8Array(value.buffer, value.byteOffset, value.byteLength);
   }
   if (Array.isArray(value)) {
     return value.map(marshallValue);
@@ -721,6 +746,9 @@ function wrapStatsObject(obj: Record<string, any>): Record<string, any> {
 
 function unmarshallValue(data: unknown): unknown {
   if (data === null || data === undefined) return data;
+  if (data instanceof Uint8Array) {
+    return new LumianaBuffer(data.buffer as any, data.byteOffset, data.byteLength);
+  }
   if (typeof data === 'object') {
     if ((data as any).name && (data as any).message && typeof (data as any).stack === 'string') {
       const err = new Error((data as any).message);
@@ -1223,7 +1251,7 @@ export async function lumianaSmartFetch(
   if (originalFetch) {
     const rpcUrl = getSyncHttpUrl();
     const authHeaders: Record<string, string> = {
-      'Content-Type': 'application/json',
+      'Content-Type': 'application/msgpack',
     };
     if (activeCredentials?.username || activeCredentials?.password) {
       const user = activeCredentials.username || '';
@@ -1236,7 +1264,7 @@ export async function lumianaSmartFetch(
       authHeaders['x-lumiana-auth'] = token;
     }
 
-    const rpcPayload = JSON.stringify({
+    const rpcPayload = lumianaEncode({
       refId: null,
       path: ['fetch'],
       args: [urlString, nodeOptions],
@@ -1247,14 +1275,20 @@ export async function lumianaSmartFetch(
     const httpRes = await originalFetch(rpcUrl, {
       method: 'POST',
       headers: authHeaders,
-      body: rpcPayload,
+      body: rpcPayload as any,
     });
 
     if (!httpRes.ok) {
       throw new Error(`[Lumiana fetch] HTTP RPC error: status ${httpRes.status}`);
     }
 
-    const data: any = await httpRes.json();
+    const buf = await httpRes.arrayBuffer();
+    let data: any;
+    try {
+      data = lumianaDecode(new Uint8Array(buf));
+    } catch {
+      data = JSON.parse(new TextDecoder().decode(buf));
+    }
     if (!data.ok) {
       throw new Error(data.error?.message || data.error || '[Lumiana fetch] Node fetch call failed');
     }
@@ -1342,7 +1376,7 @@ async function baseConnect(creds?: Credentials): Promise<LumianaClient> {
         return { __lumiana_cb__: cbId };
       }
       if (value instanceof Uint8Array || (typeof Buffer !== 'undefined' && Buffer.isBuffer(value))) {
-        return { __lumiana_bin64__: LumianaBuffer.from(value).toString('base64') };
+        return new Uint8Array(value.buffer, value.byteOffset, value.byteLength);
       }
       if (Array.isArray(value)) {
         return value.map(marshall);
@@ -1375,8 +1409,20 @@ async function baseConnect(creds?: Credentials): Promise<LumianaClient> {
       return value;
     }
 
+    function parseWorkerPacket(data: Uint8Array): any {
+      try {
+        return lumianaDecode(data);
+      } catch {
+        const text = new TextDecoder().decode(data);
+        return JSON.parse(text);
+      }
+    }
+
     function unmarshall(data: unknown): unknown {
       if (data === null || data === undefined) return data;
+      if (data instanceof Uint8Array) {
+        return new LumianaBuffer(data.buffer as any, data.byteOffset, data.byteLength);
+      }
       if (typeof data === 'object') {
         if ((data as any).name && (data as any).message && typeof (data as any).stack === 'string') {
           const err = new Error((data as any).message);
@@ -1518,9 +1564,8 @@ async function baseConnect(creds?: Credentials): Promise<LumianaClient> {
 
       // Opcode 0x04 = RUN_FUNCTION_RESULT or 0x06 = NODE_CALL_RESULT
       if (opcode === 0x04 || opcode === 0x06) {
-        const text = new TextDecoder().decode(data.subarray(1));
         try {
-          const res: ServerExecutionResponse = JSON.parse(text);
+          const res: ServerExecutionResponse = parseWorkerPacket(data.subarray(1));
           const req = pendingRequests.get(res.id);
           if (req) {
             pendingRequests.delete(res.id);
@@ -1541,9 +1586,8 @@ async function baseConnect(creds?: Credentials): Promise<LumianaClient> {
 
       // Opcode 0x07 = CALLBACK_INVOKE
       if (opcode === 0x07) {
-        const text = new TextDecoder().decode(data.subarray(1));
         try {
-          const msg = JSON.parse(text);
+          const msg = parseWorkerPacket(data.subarray(1));
           const cb = localCallbacks.get(msg.cbId) || globalLocalCallbacks.get(msg.cbId);
           if (cb) {
             const isSyncCb = globalLocalCallbacks.has(msg.cbId);
@@ -1558,36 +1602,34 @@ async function baseConnect(creds?: Credentials): Promise<LumianaClient> {
                     res.headers.forEach((v: string, k: string) => {
                       headers[k] = v;
                     });
-                    const bodyText = await res.text();
+                    const bodyBytes = new Uint8Array(await res.arrayBuffer());
                     marshalledResult = {
                       __lumiana_response__: true,
                       status: res.status,
                       statusText: res.statusText,
                       headers,
-                      body: bodyText,
+                      body: bodyBytes,
                     };
                   } else {
                     marshalledResult = marshall(res);
                   }
-                  const payload = JSON.stringify({ callId: msg.callId, ok: true, result: marshalledResult });
-                  const encoded = new TextEncoder().encode(payload);
-                  const packet = new Uint8Array(1 + encoded.length);
+                  const payload = lumianaEncode({ callId: msg.callId, ok: true, result: marshalledResult });
+                  const packet = new Uint8Array(1 + payload.length);
                   packet[0] = 0x08; // CALLBACK_RESPONSE
-                  packet.set(encoded, 1);
+                  packet.set(payload, 1);
                   ws.send(packet);
                 }
               })
               .catch((err) => {
                 if (msg.callId) {
-                  const payload = JSON.stringify({
+                  const payload = lumianaEncode({
                     callId: msg.callId,
                     ok: false,
                     error: err instanceof Error ? err.message : String(err),
                   });
-                  const encoded = new TextEncoder().encode(payload);
-                  const packet = new Uint8Array(1 + encoded.length);
+                  const packet = new Uint8Array(1 + payload.length);
                   packet[0] = 0x08;
-                  packet.set(encoded, 1);
+                  packet.set(payload, 1);
                   ws.send(packet);
                 }
               });
@@ -1600,9 +1642,8 @@ async function baseConnect(creds?: Credentials): Promise<LumianaClient> {
 
       // Opcode 0x0B = WORKER_CONSOLE_LOG
       if (opcode === 0x0B) {
-        const text = new TextDecoder().decode(data.subarray(1));
         try {
-          const { level, args } = JSON.parse(text);
+          const { level, args } = parseWorkerPacket(data.subarray(1));
           const unmarshalledArgs = Array.isArray(args) ? args.map(unmarshall) : [];
           const consoleFn = (console as any)[level] || console.log;
           let badgeBg = '#2563eb';
@@ -1619,9 +1660,8 @@ async function baseConnect(creds?: Credentials): Promise<LumianaClient> {
 
       // Opcode 0x0C = WORKER_FATAL_ERROR
       if (opcode === 0x0C) {
-        const text = new TextDecoder().decode(data.subarray(1));
         try {
-          const errInfo = JSON.parse(text);
+          const errInfo = parseWorkerPacket(data.subarray(1));
           const err = new Error(errInfo.message || 'Node Worker Fatal Error');
           if (errInfo.stack) err.stack = errInfo.stack;
           Object.assign(err, errInfo);
@@ -1674,7 +1714,7 @@ async function baseConnect(creds?: Credentials): Promise<LumianaClient> {
         pendingRequests.set(id, { resolve: res, reject: rej });
 
         const marshalledArgs = args !== null ? args.map(marshall) : null;
-        const payload = JSON.stringify({
+        const payload = lumianaEncode({
           id,
           refId: refId || null,
           path,
@@ -1684,10 +1724,9 @@ async function baseConnect(creds?: Credentials): Promise<LumianaClient> {
           module: path[0],
           method: path[1],
         });
-        const encoded = new TextEncoder().encode(payload);
-        const packet = new Uint8Array(1 + encoded.length);
+        const packet = new Uint8Array(1 + payload.length);
         packet[0] = 0x05; // NODE_CALL
-        packet.set(encoded, 1);
+        packet.set(payload, 1);
         ws.send(packet);
       });
     }
@@ -1828,6 +1867,6 @@ export const connect: ConnectAPI = {
   },
 };
 
-export { lumianaSmartFetch as fetch };
+export { lumianaSmartFetch as fetch, lumianaEncode, lumianaDecode };
 export default connect;
 
