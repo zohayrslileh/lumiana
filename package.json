@@ -1,6 +1,6 @@
 {
   "name": "lumiana",
-  "version": "0.4.2",
+  "version": "0.4.3",
   "packageManager": "bun@1.3.14",
   "description": "A local Node.js runtime for Vite with operating-system capability bridging",
   "type": "module",
