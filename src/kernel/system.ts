@@ -1,9 +1,11 @@
 import os from 'node:os';
 import childProcess from 'node:child_process';
+import { threadId } from 'node:worker_threads';
 
 /** Host operating-system queries whose Node contract is synchronous and live. */
 export class SystemKernel {
   executeSync(operation: string, args: any[]): any {
+    if (operation === 'system.threadId') return threadId;
     if (operation.startsWith('child.')) {
       const name = operation.slice('child.'.length);
       const fn = (childProcess as any)[name];

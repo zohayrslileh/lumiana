@@ -1,268 +1,150 @@
 import { parentPort, workerData, receiveMessageOnPort } from 'node:worker_threads';
-import { createRequire } from 'node:module';
-import path from 'node:path';
-import { pathToFileURL, fileURLToPath } from 'node:url';
-import { resolve as resolveImport } from 'import-meta-resolve';
-import { evaluateExpression, References } from './references.js';
-import { failure, restoreException, type Invocation, type Graph } from './protocol.js';
+import { failure } from './protocol.js';
+import { decodeException, decodeValue, encodeException, encodeValue } from './values.js';
 import { FileKernel } from './kernel/files.js';
 import { NetworkKernel } from './kernel/network.js';
 import { HttpKernel } from './kernel/http.js';
 import { SystemKernel } from './kernel/system.js';
 import { ChildProcessKernel } from './kernel/child-process.js';
-import { packKernel, unpackKernel } from './kernel-transfer.js';
+import { AddonKernel } from './kernel/addons.js';
+
 if (!parentPort) throw new Error('Lumiana requires a worker thread');
 const port = parentPort;
 const signal = new Int32Array(workerData.signal);
-const parentURL = pathToFileURL(path.join(workerData.root, 'package.json')).href;
-const require = createRequire(parentURL);
-const modules = new Map<string, any>();
-let kernelSequence = 0;
-const allocateKernelHandle = () => ++kernelSequence;
-const kernelEvent = (handle: number, event: string, ...args: any[]) =>
-    send({ type: 'kernel-event', handle, event, args }),
-  files = new FileKernel(kernelEvent, allocateKernelHandle),
-  network = new NetworkKernel(kernelEvent, allocateKernelHandle),
-  http = new HttpKernel(kernelEvent, allocateKernelHandle);
-const system = new SystemKernel();
-const children = new ChildProcessKernel(kernelEvent, allocateKernelHandle);
-let sequence = 0,
-  pumping = 0;
+const send = (message: any) => port.postMessage(message);
+
+let sequence = 0;
+const allocateHandle = () => ++sequence;
+let callbackSequence = 0;
 let context: number | undefined;
 const replies = new Map<number, any>();
-let holdingTurn: number | undefined;
-const send = (message: any) => port.postMessage(message);
+
 function pump(until: () => boolean): void {
-  pumping++;
-  try {
-    while (!until()) {
-      const version = Atomics.load(signal, 0);
-      const incoming = receiveMessageOnPort(port);
-      if (incoming) handle(incoming.message);
-      else Atomics.wait(signal, 0, version);
-    }
-  } finally {
-    pumping--;
+  while (!until()) {
+    const version = Atomics.load(signal, 0);
+    const incoming = receiveMessageOnPort(port);
+    if (incoming) handle(incoming.message);
+    else Atomics.wait(signal, 0, version);
   }
 }
-const pending = new Map<number, { resolve: (v: Graph) => void; reject: (e: Error) => void }>();
-const requireModule = (specifier: string, origin?: string) => {
-  const from = origin ? pathToFileURL(path.resolve(workerData.root, origin)).href : parentURL;
-  const resolved = resolveImport(specifier, from);
-  return require(resolved.startsWith('file:') ? fileURLToPath(resolved) : resolved);
-};
-const refs = new References({
-  sync(invocation) {
-    const id = ++sequence;
-    send({ type: 'callback', id, context, invocation });
-    pump(() => replies.has(id));
-    const reply = replies.get(id);
-    replies.delete(id);
-    if (!reply.ok) throw restoreException(reply.error, (value) => refs.decode(value));
-    return reply.value;
-  },
-  async(invocation) {
-    const id = ++sequence;
-    return new Promise<Graph>((resolve, reject) => {
-      pending.set(id, { resolve, reject });
-      send({ type: 'callback', id, invocation, async: true });
-    });
-  },
-  special(operation, args) {
-    if (operation === 'module') {
-      const resolver = args[2] ? createRequire(path.resolve(workerData.root, args[2])) : require;
-      const loaded = resolver(args[0]);
-      if (args[1] === 'default' && loaded?.__esModule) return loaded.default;
-      return loaded;
-    }
-    if (operation === 'global') return (globalThis as any)[args[0]];
-    if (operation === 'moduleBindings') {
-      const [specifier, origin, bindings] = args;
-      const loaded = requireModule(specifier, origin);
-      const isESM = Object.prototype.toString.call(loaded) === '[object Module]';
-      const namespace = isESM
-        ? loaded
-        : Object.assign(Object.create(null), loaded, { default: loaded });
-      return Object.fromEntries(
-        Object.values(bindings).map((exported: any, index: number) => {
-          if (exported !== '*' && isESM && !(exported in namespace))
-            throw new SyntaxError(`Module ${specifier} has no ${exported} export`);
-          return [index, exported === '*' ? namespace : namespace[exported]];
-        }),
-      );
-    }
-    if (operation === 'moduleCall' || operation === 'moduleConstruct') {
-      const [specifier, origin, packedPath, packedArgs] = args;
-      const memberPath = unpackKernel(packedPath);
-      const callArgs = unpackKernel(packedArgs);
-      let receiver = requireModule(specifier, origin);
-      let fn = receiver;
-      for (const key of memberPath) {
-        receiver = fn;
-        fn = Reflect.get(receiver, key, receiver);
-      }
-      if (typeof fn !== 'function')
-        throw new TypeError(`${specifier}.${memberPath.join('.')} is not a function`);
-      return operation === 'moduleCall'
-        ? Reflect.apply(fn, receiver, callArgs)
-        : Reflect.construct(fn, callArgs);
-    }
-    if (operation === 'evaluate')
-      return evaluateExpression(args[0], (name) => (globalThis as any)[name]);
-    throw new TypeError(`Unknown operation ${operation}`);
-  },
-});
-const exception = (error: unknown) =>
-  error instanceof Error ? failure(error) : { ...failure(error), thrown: refs.encode(error) };
+
+function invokeCallback(id: number, receiver: any, args: any[]): any {
+  const request = ++callbackSequence;
+  send({
+    type: 'addon-callback',
+    id: request,
+    callback: id,
+    context,
+    receiver: encodeValue(receiver),
+    args: encodeValue(args),
+  });
+  pump(() => replies.has(request));
+  const reply = replies.get(request);
+  replies.delete(request);
+  if (!reply.ok) throw decodeException(reply.error);
+  return decodeValue(reply.value);
+}
+const kernelEvent = (handle: number, event: string, ...args: any[]) =>
+  send({ type: 'kernel-event', handle, event, value: encodeValue(args) });
+
+const files = new FileKernel(kernelEvent, allocateHandle);
+const network = new NetworkKernel(kernelEvent, allocateHandle);
+const http = new HttpKernel(kernelEvent, allocateHandle);
+const system = new SystemKernel();
+const children = new ChildProcessKernel(kernelEvent, allocateHandle);
+const addons = new AddonKernel(workerData.root, allocateHandle, invokeCallback);
+
+const decodeArguments = (values: any[]) => values.map((value) => decodeValue(value));
+const result = (id: number, value: any) =>
+  send({ type: 'result', id, ok: true, value: encodeValue(value) });
+const reject = (id: number, error: unknown) =>
+  send({ type: 'result', id, ok: false, error: encodeException(error) });
+
+async function close(): Promise<void> {
+  await Promise.all([files.close(), network.close(), http.close(), children.close()]);
+  addons.close();
+  process.exit(0);
+}
+
 function handle(message: any): void {
   if (message.type === 'close') {
-    refs.close();
-    void Promise.all([files.close(), network.close(), http.close(), children.close()]).finally(() =>
-      process.exit(0),
-    );
+    void close();
     return;
   }
-  if (message.type === 'turn-end') {
-    if (holdingTurn === message.turn) holdingTurn = undefined;
-    return;
-  }
-  if (message.type === 'callback-result') {
-    const promise = pending.get(message.id);
-    if (promise) {
-      pending.delete(message.id);
-      message.ok
-        ? promise.resolve(message.value)
-        : promise.reject(restoreException(message.error, (value) => refs.decode(value)));
-    } else replies.set(message.id, message);
+  if (message.type === 'addon-callback-result') {
+    replies.set(message.id, message);
     return;
   }
   if (message.type !== 'invoke') return;
-  if (message.invocation.operation === 'await') {
-    Promise.resolve(refs.decode(message.invocation.args[0])).then(
-      (value) => send({ type: 'result', id: message.id, ok: true, value: refs.encode(value) }),
-      (error) => send({ type: 'result', id: message.id, ok: false, error: exception(error) }),
-    );
-    return;
-  }
-  const finish = (ok: boolean, value: any) => {
-    send(
-      ok
-        ? { type: 'result', id: message.id, ok: true, value }
-        : { type: 'result', id: message.id, ok: false, error: exception(value) },
-    );
-    // Hold the caller's turn without releasing native nextTick or timers.
-    if (message.sync && !pumping && message.turn !== undefined) {
-      holdingTurn = message.turn;
-      pump(() => holdingTurn !== message.turn);
-    }
-  };
-  if (message.invocation.operation === 'kernel') {
-    const [operation, ...packed] = message.invocation.args.map((arg: Graph) => refs.decode(arg));
-    const args = packed.map((value: any) => unpackKernel(value));
-    const kernel = operation.startsWith('fs.')
-      ? files
-      : operation.startsWith('net.')
-        ? network
-        : operation.startsWith('child.')
-          ? children
-          : http;
-    void kernel.execute(operation, args).then(
-      (value) => finish(true, refs.encode(packKernel(value))),
-      (error) => finish(false, error),
-    );
-    return;
-  }
-  if (message.invocation.operation === 'kernelSync') {
-    const [operation, ...packed] = message.invocation.args.map((arg: Graph) => refs.decode(arg));
-    const args = packed.map((value: any) => unpackKernel(value));
-    try {
-      const value = operation.startsWith('fs.')
-        ? files.executeSync(operation, args)
-        : operation.startsWith('os.')
-          ? system.executeSync(operation, args)
-          : operation.startsWith('child.')
-            ? system.executeSync(operation, args)
-            : undefined;
-      if (
-        !operation.startsWith('fs.') &&
-        !operation.startsWith('os.') &&
-        !operation.startsWith('child.')
-      )
-        throw new TypeError(`Unknown synchronous operation ${operation}`);
-      finish(true, refs.encode(packKernel(value)));
-    } catch (error) {
-      finish(false, error);
-    }
-    return;
-  }
-  if (message.invocation.operation === 'module') {
-    const [specifier, mode, origin] = message.invocation.args.map((arg: Graph) => refs.decode(arg));
-    if (mode === 'namespace' || mode === 'default') {
-      const from = origin ? pathToFileURL(path.resolve(workerData.root, origin)).href : parentURL;
-      const key = from + '\0' + specifier + '\0' + mode;
-      try {
-        if (modules.has(key)) {
-          finish(true, refs.encodeResult(modules.get(key), message.invocation.path, true));
-          return;
-        }
-        const resolved = resolveImport(specifier, from);
-        if (message.sync) {
-          const loaded = require(resolved.startsWith('file:') ? fileURLToPath(resolved) : resolved);
-          const isESM = Object.prototype.toString.call(loaded) === '[object Module]';
-          if (mode === 'default' && isESM && !('default' in loaded))
-            throw new SyntaxError(`Module ${specifier} has no default export`);
-          const namespace = isESM
-            ? loaded
-            : Object.assign(Object.create(null), loaded, { default: loaded });
-          const value = mode === 'default' ? namespace.default : namespace;
-          modules.set(key, value);
-          finish(true, refs.encodeResult(value, message.invocation.path, true));
-          return;
-        }
-        void import(resolved)
-          .then((namespace) => {
-            if (mode === 'default' && !('default' in namespace))
-              throw new SyntaxError(`Module ${specifier} has no default export`);
-            const value = mode === 'default' ? namespace.default : namespace;
-            modules.set(key, value);
-            finish(true, refs.encodeResult(value, message.invocation.path, true));
-          })
-          .catch((error) => finish(false, error));
-      } catch (error) {
-        finish(false, error);
-      }
+  const invocation = message.invocation;
+  try {
+    const [operation, ...args] = decodeArguments(invocation.args);
+    if (invocation.operation === 'kernel') {
+      const kernel = operation.startsWith('fs.')
+        ? files
+        : operation.startsWith('addon.')
+          ? addons
+          : operation.startsWith('net.') ||
+              operation.startsWith('fetch.') ||
+              operation.startsWith('websocket.')
+            ? network
+            : operation.startsWith('child.')
+              ? children
+              : http;
+      void kernel.execute(operation, args).then(
+        (value) => result(message.id, value),
+        (error) => reject(message.id, error),
+      );
       return;
     }
-  }
-  const before = context;
-  context = message.sync ? message.id : undefined;
-  let value: any,
-    ok = true;
-  try {
-    value = refs.execute(message.invocation);
+    if (invocation.operation === 'kernelSync') {
+      const previous = context;
+      context = message.id;
+      let value: any;
+      try {
+        value = operation.startsWith('fs.')
+          ? files.executeSync(operation, args)
+          : operation.startsWith('addon.')
+            ? addons.executeSync(operation, args)
+            : operation.startsWith('os.') ||
+                operation.startsWith('child.') ||
+                operation.startsWith('system.')
+              ? system.executeSync(operation, args)
+              : (() => {
+                  throw new TypeError(`Unknown synchronous operation ${operation}`);
+                })();
+      } finally {
+        context = previous;
+      }
+      result(message.id, value);
+      return;
+    }
+    throw new TypeError(`Unknown boundary operation ${invocation.operation}`);
   } catch (error) {
-    ok = false;
-    value = error;
-  } finally {
-    context = before;
+    reject(message.id, error);
   }
-  finish(ok, value);
 }
+
+port.on('message', handle);
+
 for (const level of ['log', 'info', 'warn', 'error', 'debug', 'trace'] as const) {
-  console[level] = (...args: unknown[]) =>
+  console[level] = (...args: unknown[]) => {
+    const values = args.map((value) => {
+      try {
+        return encodeValue(value);
+      } catch {
+        return encodeValue(String(value));
+      }
+    });
     send({
       type: 'console',
       level,
-      context,
-      values: args.map((v) => refs.encode(v)),
-      errors: args.map((v) => (v instanceof Error ? failure(v) : null)),
+      values,
+      errors: args.map((value) => (value instanceof Error ? failure(value) : null)),
     });
+  };
 }
-function fatal(error: unknown): void {
-  send({ type: 'fatal', error: exception(error) });
-  process.exitCode = 1;
-}
-process.on('uncaughtException', fatal);
-process.on('unhandledRejection', fatal);
-port.on('message', handle);
+
+process.on('uncaughtException', (error) => send({ type: 'fatal', error: failure(error) }));
+process.on('unhandledRejection', (error) => send({ type: 'fatal', error: failure(error) }));
 send({ type: 'ready' });

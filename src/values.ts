@@ -1,11 +1,12 @@
-import { Buffer } from 'buffer';
-import type { Atom, Graph, Reference, ValueNode } from './protocol.js';
-export interface ValueReferences {
-  export(value: object | symbol): Reference;
-  remote(value: object | symbol): number | undefined;
-  import(ref: Reference): any;
-  original(id: number): any;
-}
+import { Buffer } from 'node:buffer';
+import {
+  failure,
+  restoreError,
+  type Atom,
+  type Failure,
+  type Graph,
+  type ValueNode,
+} from './protocol.js';
 const symbols = new Map<symbol, string>();
 for (const name of Object.getOwnPropertyNames(Symbol)) {
   const value = (Symbol as any)[name];
@@ -27,11 +28,11 @@ const binary: Record<string, (b: Uint8Array<ArrayBuffer>) => unknown> = {
   BigInt64Array: (b) => new BigInt64Array(b.buffer),
   BigUint64Array: (b) => new BigUint64Array(b.buffer),
 };
-/** Plain records are snapshots. Native values retain their owner and identity. */
-export function encodeValue(value: unknown, refs: ValueReferences, reference = false): Graph {
+/** Boundary values are copied. JavaScript identity never leaves its local runtime. */
+export function encodeValue(value: unknown): Graph {
   const nodes: ValueNode[] = [],
     seen = new Map<unknown, number>();
-  function visit(value: any, force = false): Atom {
+  function visit(value: any): Atom {
     if (value === null || ['boolean', 'number', 'string'].includes(typeof value)) return value;
     const previous = seen.get(value);
     if (previous !== undefined) return { index: previous };
@@ -39,10 +40,7 @@ export function encodeValue(value: unknown, refs: ValueReferences, reference = f
     seen.set(value, index);
     nodes.push({ kind: 'undefined' });
     let node: ValueNode;
-    const remote =
-      value !== undefined && typeof value !== 'bigint' ? refs.remote(value) : undefined;
-    if (remote !== undefined) node = { kind: 'return', id: remote };
-    else if (value === undefined) node = { kind: 'undefined' };
+    if (value === undefined) node = { kind: 'undefined' };
     else if (typeof value === 'bigint') node = { kind: 'bigint', value: String(value) };
     else if (
       typeof value === 'symbol' &&
@@ -53,36 +51,43 @@ export function encodeValue(value: unknown, refs: ValueReferences, reference = f
         name: symbols.get(value) ?? Symbol.keyFor(value)!,
         global: !symbols.has(value),
       };
-    else if (!force && (value instanceof ArrayBuffer || ArrayBuffer.isView(value))) {
+    else if (value instanceof ArrayBuffer || ArrayBuffer.isView(value)) {
       const bytes =
         value instanceof ArrayBuffer
           ? new Uint8Array(value)
           : new Uint8Array(value.buffer, value.byteOffset, value.byteLength);
       const name = Buffer.isBuffer(value) ? 'Buffer' : value.constructor.name;
-      node = Object.hasOwn(binary, name)
-        ? { kind: 'binary', name, bytes }
-        : { kind: 'reference', ref: refs.export(value) };
-    } else if (
-      !force &&
+      if (!Object.hasOwn(binary, name)) throw new TypeError(`Unsupported binary type ${name}`);
+      node = { kind: 'binary', name, bytes };
+    } else if (Array.isArray(value)) node = { kind: 'array', items: value.map(visit) };
+    else if (value instanceof Date) node = { kind: 'date', value: value.getTime() };
+    else if (value instanceof RegExp)
+      node = { kind: 'regexp', source: value.source, flags: value.flags };
+    else if (
       typeof value === 'object' &&
       (Object.getPrototypeOf(value) === Object.prototype ||
         Object.getPrototypeOf(value) === null) &&
-      Object.prototype.toString.call(value) === '[object Object]'
+      Object.prototype.toString.call(value) === '[object Object]' &&
+      Reflect.ownKeys(value).every((key) => {
+        const descriptor = Object.getOwnPropertyDescriptor(value, key)!;
+        return descriptor.enumerable && 'value' in descriptor;
+      })
     )
       node = {
         kind: 'object',
         nullPrototype: Object.getPrototypeOf(value) === null,
-        entries: Reflect.ownKeys(value)
-          .filter((k) => Object.getOwnPropertyDescriptor(value, k)?.enumerable)
-          .map((k) => [visit(k), visit(value[k])]),
+        entries: Reflect.ownKeys(value).map((k) => [visit(k), visit(value[k])]),
       };
-    else node = { kind: 'reference', ref: refs.export(value) };
+    else
+      throw new TypeError(
+        `Cannot send ${typeof value === 'function' ? 'a function' : Object.prototype.toString.call(value)} across the Lumiana boundary`,
+      );
     nodes[index] = node;
     return { index };
   }
-  return { root: visit(value, reference), nodes };
+  return { root: visit(value), nodes };
 }
-export function decodeValue(graph: Graph, refs: ValueReferences): any {
+export function decodeValue(graph: Graph): any {
   const values: any[] = graph.nodes.map((node) => {
     switch (node.kind) {
       case 'undefined':
@@ -93,21 +98,25 @@ export function decodeValue(graph: Graph, refs: ValueReferences): any {
         return node.global ? Symbol.for(node.name) : (Symbol as any)[node.name];
       case 'object':
         return Object.create(node.nullPrototype ? null : Object.prototype);
+      case 'array':
+        return [];
+      case 'date':
+        return new Date(node.value);
+      case 'regexp':
+        return new RegExp(node.source, node.flags);
       case 'binary': {
         const construct = Object.hasOwn(binary, node.name) ? binary[node.name] : undefined;
         if (!construct) throw new TypeError(`Unknown binary type ${node.name}`);
         return construct(new Uint8Array(node.bytes));
       }
-      case 'reference':
-        return refs.import(node.ref);
-      case 'return':
-        return refs.original(node.id);
     }
   });
   const read = (atom: Atom): any =>
     atom !== null && typeof atom === 'object' ? values[atom.index] : atom;
   graph.nodes.forEach((node, i) => {
-    if (node.kind === 'object')
+    if (node.kind === 'array') {
+      for (const item of node.items) values[i].push(read(item));
+    } else if (node.kind === 'object')
       for (const [key, value] of node.entries)
         Object.defineProperty(values[i], read(key), {
           value: read(value),
@@ -118,3 +127,15 @@ export function decodeValue(graph: Graph, refs: ValueReferences): any {
   });
   return read(graph.root);
 }
+
+export function encodeException(error: unknown): Failure {
+  if (error instanceof Error) return failure(error);
+  try {
+    return { ...failure(error), thrown: encodeValue(error) };
+  } catch {
+    return failure(error);
+  }
+}
+
+export const decodeException = (info: Failure): unknown =>
+  info.thrown ? decodeValue(info.thrown) : restoreError(info);

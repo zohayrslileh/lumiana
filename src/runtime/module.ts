@@ -25,7 +25,6 @@ import perfHooks from './perf-hooks.js';
 import tty from './tty.js';
 import v8 from './v8.js';
 import vm from './vm.js';
-import { nativeRequire } from './bridge.js';
 
 const local: Record<string, any> = Object.assign(Object.create(null), {
   assert,
@@ -119,12 +118,21 @@ export function createRequire(
       error.code = 'MODULE_NOT_FOUND';
       throw error;
     }
-    return local[name] ?? nativeRequire(specifier, sourceOrigin);
+    if (Object.hasOwn(local, name)) return local[name];
+    const error = new Error(
+      `Dynamic require(${JSON.stringify(specifier)}) cannot be included in the browser bundle`,
+    ) as Error & { code: string };
+    error.code = 'MODULE_NOT_FOUND';
+    throw error;
   }) as NodeRequire;
-  load.resolve = ((specifier: string) =>
-    nativeRequire('node:module', sourceOrigin, ['createRequire'])(
-      sourceOrigin ?? _filename,
-    ).resolve(specifier)) as NodeRequire['resolve'];
+  load.resolve = ((specifier: string) => {
+    if (isBuiltin(specifier)) return specifier;
+    const error = new Error(`Cannot resolve ${JSON.stringify(specifier)} at runtime`) as Error & {
+      code: string;
+    };
+    error.code = 'MODULE_NOT_FOUND';
+    throw error;
+  }) as NodeRequire['resolve'];
   load.cache = Object.create(null);
   load.extensions = Object.create(null);
   load.main = undefined;

@@ -11,6 +11,7 @@ import { WebSocketServer, WebSocket } from 'ws';
 import type { Duplex } from 'node:stream';
 import type { Http2SecureServer } from 'node:http2';
 import { PREFIX, decodePacket, encodePacket, failure } from './protocol.js';
+import { encodeValue } from './values.js';
 export interface HostOptions {
   root: string;
   username: string;
@@ -29,7 +30,6 @@ interface Session {
   signal: Int32Array;
   socket?: WebSocket;
   responses: Map<number, ServerResponse>;
-  logs: Map<number, any[]>;
   stop(): Promise<void>;
   post(message: any): void;
 }
@@ -106,8 +106,8 @@ export function attachHost(server: Server | Http2SecureServer, options: HostOpti
     }
   }
   async function establish(): Promise<{ id: string; session: Session }> {
-    const id = randomUUID(),
-      signal = new Int32Array(new SharedArrayBuffer(4));
+    const id = randomUUID();
+    const signal = new Int32Array(new SharedArrayBuffer(4));
     const worker = new Worker(new URL('./worker.js', import.meta.url), {
       workerData: { root: options.root, signal: signal.buffer },
       stdout: true,
@@ -120,7 +120,6 @@ export function attachHost(server: Server | Http2SecureServer, options: HostOpti
       worker,
       signal,
       responses: new Map(),
-      logs: new Map(),
       post(message) {
         worker.postMessage(message);
         Atomics.add(signal, 0, 1);
@@ -133,7 +132,6 @@ export function attachHost(server: Server | Http2SecureServer, options: HostOpti
           for (const res of session.responses.values())
             respond(res, { ok: false, error: failure(new Error('Lumiana worker stopped')) }, true);
           session.responses.clear();
-          session.logs.clear();
           session.socket?.close(1000, 'Lumiana disconnected');
           session.post({ type: 'close' });
           await worker.terminate();
@@ -157,25 +155,17 @@ export function attachHost(server: Server | Http2SecureServer, options: HostOpti
         void session.stop();
         return;
       }
-      const context = message.type === 'result' ? message.id : message.context;
-      if (
-        message.type === 'console' &&
-        message.context !== undefined &&
-        session.responses.has(message.context)
-      ) {
-        const logs = session.logs.get(context) ?? [];
-        logs.push(message);
-        session.logs.set(context, logs);
-        return;
-      }
+      const responseId =
+        message.type === 'addon-callback' && message.context !== undefined
+          ? message.context
+          : message.id;
       const res =
-        message.type === 'result' || message.type === 'callback'
-          ? session.responses.get(context)
+        message.type === 'result' || message.type === 'addon-callback'
+          ? session.responses.get(responseId)
           : undefined;
       if (res) {
-        session.responses.delete(context);
-        respond(res, { ...message, logs: session.logs.get(context) ?? [] }, true);
-        session.logs.delete(context);
+        session.responses.delete(responseId);
+        respond(res, message, true);
       } else if (session.socket?.readyState === WebSocket.OPEN)
         session.socket.send(encodePacket(message));
     });
@@ -240,6 +230,7 @@ export function attachHost(server: Server | Http2SecureServer, options: HostOpti
         }
         respond(res, {
           id,
+          root: options.root,
           status: status(),
           process: processSnapshot(),
           os: osSnapshot(),
@@ -252,8 +243,10 @@ export function attachHost(server: Server | Http2SecureServer, options: HostOpti
           res.end('Lumiana is disconnected');
           return;
         }
-        const context = packet.type === 'callback-result' ? packet.context : packet.id;
-        session.responses.set(context, res);
+        session.responses.set(
+          packet.type === 'addon-callback-result' ? packet.context : packet.id,
+          res,
+        );
         session.post(packet);
       }
     } catch (error) {
@@ -305,7 +298,7 @@ export function attachHost(server: Server | Http2SecureServer, options: HostOpti
             ),
           );
           if (packet.type === 'status')
-            ws.send(encodePacket({ type: 'status', id: packet.id, value: status() }));
+            ws.send(encodePacket({ type: 'status', id: packet.id, value: encodeValue(status()) }));
           else session.post(packet);
         } catch (error) {
           ws.send(encodePacket({ type: 'fatal', error: failure(error) }));
@@ -349,8 +342,8 @@ const within = (root: string, file: string) => {
   return !relative.startsWith('..' + path.sep) && relative !== '..' && !path.isAbsolute(relative);
 };
 
-export function staticHandler(publicDir: string, base = '/') {
-  const root = fs.realpath(publicDir);
+export function staticHandler(clientDir: string, base = '/') {
+  const root = fs.realpath(clientDir);
   return async (req: IncomingMessage, res: ServerResponse): Promise<void> => {
     try {
       if (req.method !== 'GET' && req.method !== 'HEAD') {
@@ -373,9 +366,9 @@ export function staticHandler(publicDir: string, base = '/') {
         res.end();
         return;
       }
-      const publicRoot = await root;
-      let file = path.resolve(publicRoot, relative || 'index.html');
-      if (!within(publicRoot, file)) {
+      const clientRoot = await root;
+      let file = path.resolve(clientRoot, relative || 'index.html');
+      if (!within(clientRoot, file)) {
         res.writeHead(403);
         res.end();
         return;
@@ -390,10 +383,10 @@ export function staticHandler(publicDir: string, base = '/') {
           res.end();
           return;
         }
-        file = await fs.realpath(path.join(publicRoot, 'index.html'));
+        file = await fs.realpath(path.join(clientRoot, 'index.html'));
         stat = await fs.stat(file);
       }
-      if (!within(publicRoot, file)) {
+      if (!within(clientRoot, file)) {
         res.writeHead(403);
         res.end();
         return;
@@ -424,13 +417,13 @@ export function staticHandler(publicDir: string, base = '/') {
 }
 
 export interface ServeOptions extends HostOptions {
-  publicDir: string;
+  clientDir: string;
   port?: number;
   hostname?: string;
   base?: string;
 }
 export async function serve(options: ServeOptions): Promise<Server> {
-  const handler = staticHandler(options.publicDir, options.base);
+  const handler = staticHandler(options.clientDir, options.base);
   const server = http.createServer((req, res) => {
     void host.handle(req, res, () => {
       void handler(req, res);

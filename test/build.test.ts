@@ -3,7 +3,24 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import os from 'node:os';
-import { Bundling, transformSource } from '../src/build.js';
+import {
+  NativeAddons,
+  moduleExportNames,
+  requiresNodeResolution,
+  transformSource,
+} from '../src/build.js';
+
+test('both Node builtin specifier forms establish Node execution provenance', () => {
+  for (const source of [
+    "const fs = require('fs');",
+    "const fs = require('node:fs');",
+    "import path from 'path';",
+    "export * from 'node:util';",
+  ])
+    assert.equal(requiresNodeResolution(source), true, source);
+
+  assert.equal(requiresNodeResolution("const utility = require('utility');"), false);
+});
 test('read-chain transforms preserve calls, writes, optional access and computed-key ordering', async () => {
   const source = `export default function () {
     const events = [];
@@ -26,25 +43,19 @@ test('read-chain transforms preserve calls, writes, optional access and computed
     return { read, computed, called, tagged, optional, skipped, events, deleted: !('value' in leaf) };
   }`;
   const transformed = await transformSource(source, 'reader.js', {
-    place: async () => ({ native: false }),
-    client: new URL('../dist/client.js', import.meta.url).href,
-    access: new URL('../dist/access.js', import.meta.url).href,
+    place: async () => ({}),
   });
-  assert.ok(transformed);
-  assert.match(transformed.code, /readPath as/);
-  const load = (code: string) =>
-    import('data:text/javascript;base64,' + Buffer.from(code).toString('base64'));
-  assert.deepEqual((await load(transformed.code)).default(), (await load(source)).default());
+  assert.equal(transformed, null, 'local property reads require no transform');
 
   const global = await transformSource('export const home = process.env.HOME;', 'entry.js', {
-    place: async () => ({ native: true }),
+    place: async () => ({}),
   });
   assert.match(global!.code, /from "node:process"/);
   assert.doesNotMatch(global!.code, /nativeGlobal as/);
   const intrinsic = await transformSource(
     'export const value = JSON.stringify(process.env);',
     'entry.js',
-    { place: async () => ({ native: false }) },
+    { place: async () => ({}) },
   );
   assert.match(intrinsic!.code, /from "node:process"/);
   assert.doesNotMatch(intrinsic!.code, /evaluateIntrinsic as/);
@@ -52,28 +63,21 @@ test('read-chain transforms preserve calls, writes, optional access and computed
     "export const x = require('any-package').branch.value;",
     'entry.js',
     {
-      place: async () => ({ native: true }),
+      place: async () => ({}),
     },
   );
-  assert.match(module!.code, /\("any-package",null,null,\["branch","value"\]\)/);
+  assert.equal(module, null, 'package requires remain local');
   const metadata = 'export const mode = import.meta.env.MODE;';
-  assert.equal(
-    await transformSource(metadata, 'entry.js', { place: async () => ({ native: false }) }),
-    null,
-  );
+  assert.equal(await transformSource(metadata, 'entry.js', { place: async () => ({}) }), null);
 
-  const cjs = await transformSource(
-    "'use strict'; module.exports = function(value) { return { strict: this === undefined, value: value.child.value }; };",
-    'reader.cjs',
-    {
-      place: async () => ({ native: false }),
-    },
-  );
-  assert.ok(cjs);
-  assert.ok(cjs.code.startsWith("'use strict';"));
-  assert.ok(!cjs.code.includes('import {'));
+  const cjsSource =
+    "'use strict'; module.exports = function(value) { return { strict: this === undefined, value: value.child.value }; };";
+  const cjs = await transformSource(cjsSource, 'reader.cjs', {
+    place: async () => ({}),
+  });
+  assert.equal(cjs, null);
   const exports = { exports: undefined as any };
-  new Function('module', cjs.code)(exports);
+  new Function('module', cjsSource)(exports);
   assert.deepEqual(exports.exports.call(undefined, { child: { value: 8 } }), {
     strict: true,
     value: 8,
@@ -84,7 +88,7 @@ test('CommonJS transforms preserve the CommonJS module contract', async () => {
     "'use strict';module.exports=(name)=>{setImmediate(()=>{});return [process.env,Buffer.from('x'),require(name)]};",
     'runtime.cjs',
     {
-      place: async () => ({ native: false }),
+      place: async () => ({}),
       origin: 'node_modules/runtime/runtime.cjs',
     },
   );
@@ -98,15 +102,15 @@ test('CommonJS transforms preserve the CommonJS module contract', async () => {
   assert.match(transformed.code, /Symbol\.for\("lumiana\.runtime"\)/);
   assert.match(transformed.code, /process:__lumiana/);
   assert.match(transformed.code, /setImmediate:__lumiana/);
-  assert.match(transformed.code, /nativeModule:__lumiana/);
+  assert.match(transformed.code, /require\(name\)/);
 });
 test('scope-aware transforms preserve explicit browser access and local bindings', async () => {
   const source = `import fs from 'node:fs';import {readFile} from 'node:fs/promises';const native=fs.readFileSync('x');const same=fetch('/x');const remote=fetch('https://example.com');window.fetch('/explicit');new WebSocket('/socket');function shadow(fetch,WebSocket,process){fetch();new WebSocket();return process;}const fields={fetch,process};`;
   const transformed = await transformSource(source, 'entry.ts', {
-    place: async (id) => ({ native: id.startsWith('node:') }),
+    place: async () => ({}),
   });
   assert.ok(transformed);
-  assert.ok(!transformed.code.includes("from 'node:fs'"));
+  assert.ok(transformed.code.includes("from 'node:fs'"));
   assert.ok(transformed.code.includes("window.fetch('/explicit')"));
   assert.ok(
     transformed.code.includes(
@@ -116,6 +120,41 @@ test('scope-aware transforms preserve explicit browser access and local bindings
   assert.match(transformed.code, /fetch: __lumiana/);
   assert.match(transformed.code, /hybridFetch as/);
 });
+test('dependency environment probes remain owned by Vite and the browser', async () => {
+  for (const source of [
+    "module.exports=process.env.NODE_ENV==='production'?'production':'development';",
+    "const schedule=typeof setImmediate==='function'?setImmediate:queueMicrotask;module.exports=schedule;",
+  ])
+    assert.equal(
+      await transformSource(source, 'node_modules/dependency/index.js', {
+        place: async () => ({}),
+        nodeGlobals: false,
+      }),
+      null,
+    );
+
+  assert.equal(
+    await transformSource('export const mode=process.env.NODE_ENV;', 'src/application.ts', {
+      place: async () => ({}),
+    }),
+    null,
+    'Vite owns its NODE_ENV replacement in application modules too',
+  );
+});
+test('module export evidence follows export-all edges', async () => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), 'lumiana-exports-'));
+  try {
+    const entry = path.join(root, 'entry.js');
+    await fs.writeFile(entry, "export * from './runtime.js';export const direct=true;");
+    await fs.writeFile(path.join(root, 'runtime.js'), 'export const transitive=true;');
+    const names = await moduleExportNames(entry, async (id, importer) =>
+      id.startsWith('.') ? path.resolve(path.dirname(importer), id) : undefined,
+    );
+    assert.deepEqual(names, ['direct', 'transitive']);
+  } finally {
+    await fs.rm(root, { recursive: true, force: true });
+  }
+});
 test('module placement receives the exports required by each static use', async () => {
   const requested: [string, string[]][] = [];
   await transformSource(
@@ -124,7 +163,7 @@ test('module placement receives the exports required by each static use', async 
     {
       place: async (id, names = []) => {
         requested.push([id, names]);
-        return { native: false };
+        return {};
       },
     },
   );
@@ -139,7 +178,7 @@ test('createRequire records unavailable static dependencies at build time', asyn
     'package.js',
     {
       origin: 'node_modules/package/index.js',
-      place: async (id) => ({ native: false, available: id !== 'optional-native' }),
+      place: async (id) => ({ available: id !== 'optional-native' }),
     },
   );
   assert.match(
@@ -161,7 +200,7 @@ function untouched(fileURLToPath){return fileURLToPath(import.meta.url)}`,
     '/workspace/src/entry.ts',
     {
       sourceURL,
-      place: async () => ({ native: false }),
+      place: async () => ({}),
     },
   );
   assert.ok(transformed);
@@ -180,34 +219,89 @@ function untouched(fileURLToPath){return fileURLToPath(import.meta.url)}`,
     /function untouched\(fileURLToPath\)\{return fileURLToPath\(import\.meta\.url\)\}/,
   );
 });
-test('bundling is the default; Node built-ins are not grounds for excluding a package', async () => {
+test('CommonJS module metadata resolves from its logical source origin', async () => {
+  const transformed = await transformSource(
+    'module.exports={file:__filename,directory:__dirname};',
+    '/workspace/node_modules/package/index.cjs',
+    {
+      origin: 'node_modules/package/index.cjs',
+      sourceURL: 'file:///workspace/node_modules/package/index.cjs',
+      place: async () => ({}),
+    },
+  );
+  assert.match(transformed!.code, /moduleFilename:__lumiana/);
+  assert.match(transformed!.code, /__lumiana\d+\("node_modules\/package\/index\.cjs"\)/);
+  assert.match(transformed!.code, /moduleDirname:__lumiana/);
+  assert.doesNotMatch(transformed!.code, /\b__filename\b|\b__dirname\b/);
+});
+test('packages remain local and native-addon ownership is tracked independently', async () => {
   const temp = await fs.mkdtemp(path.join(os.tmpdir(), 'lumiana-placement-'));
   try {
-    const good = path.join(temp, 'good.js'),
-      native = path.join(temp, 'native.cjs'),
-      dynamic = path.join(temp, 'dynamic.cjs'),
-      data = path.join(temp, 'data.json');
+    const packageRoot = path.join(temp, 'node_modules', 'native-package');
+    await fs.mkdir(packageRoot, { recursive: true });
     await fs.writeFile(
-      good,
-      "import {readFileSync} from 'node:fs';export const read=(file)=>readFileSync(file);export const add=(a,b)=>a+b;",
+      path.join(packageRoot, 'package.json'),
+      JSON.stringify({ name: 'native-package', version: '2.0.0' }),
     );
-    await fs.writeFile(native, "module.exports=require('./binding.node');");
-    await fs.writeFile(path.join(temp, 'binding.node'), 'binary fixture');
-    await fs.writeFile(dynamic, 'module.exports=name=>require(name);');
-    await fs.writeFile(data, '{"value":42}');
-    const placement = new Bundling(temp, ['explicit']);
-    const goodPlacement = await placement.placement('good', good);
-    assert.equal(goodPlacement.native, false);
-    assert.equal((await placement.placement('native', native)).native, true);
-    assert.equal((await placement.placement('dynamic', dynamic)).native, false);
-    assert.equal((await placement.placement('data', data)).native, false);
-    assert.equal((await placement.placement('explicit', good)).native, true);
+    await fs.writeFile(path.join(packageRoot, 'binding.node'), 'binary fixture');
+    await fs.mkdir(path.join(packageRoot, 'prebuilds'));
+    await fs.writeFile(
+      path.join(packageRoot, 'prebuilds', `${process.platform}-${process.arch}.node`),
+      'platform binary fixture',
+    );
+    const addons = new NativeAddons(temp);
+    assert.deepEqual(await addons.dependencies(), {});
+    assert.equal(
+      addons.addon(path.join(packageRoot, 'binding.node')),
+      'native-package/binding.node',
+    );
+    assert.equal(
+      await addons.locate('binding.node', path.join(packageRoot, 'loader.cjs')),
+      'native-package/binding.node',
+    );
+    assert.equal(
+      await addons.locate('computed-name.node', path.join(packageRoot, 'loader.cjs')),
+      undefined,
+      'a literal addon request must resolve exactly',
+    );
+    assert.equal(
+      await addons.locate('computed-name.node', path.join(packageRoot, 'loader.cjs'), true),
+      `native-package/prebuilds/${process.platform}-${process.arch}.node`,
+    );
+    assert.deepEqual(await addons.dependencies(), { 'native-package': '2.0.0' });
+
+    const located = await transformSource(
+      "module.exports=require('addon-locator')('binding.node');",
+      path.join(packageRoot, 'loader.cjs'),
+      {
+        origin: 'node_modules/native-package/loader.cjs',
+        locateAddon: (request) => addons.locate(request, path.join(packageRoot, 'loader.cjs')),
+        place: async () => ({}),
+      },
+    );
+    assert.match(located!.code, /nativeAddon:__lumiana/);
+    assert.match(located!.code, /\("native-package\/binding\.node"\)/);
+    assert.doesNotMatch(located!.code, /addon-locator/);
+
+    const computed = await transformSource(
+      "const path=require('path');let file=path.join(__dirname,'binding.node');module.exports=require(file);",
+      path.join(packageRoot, 'computed-loader.cjs'),
+      {
+        origin: 'node_modules/native-package/computed-loader.cjs',
+        locateAddon: (request, computed) =>
+          addons.locate(request, path.join(packageRoot, 'computed-loader.cjs'), computed),
+        place: async () => ({}),
+      },
+    );
+    assert.match(computed!.code, /nativeAddon:__lumiana/);
+    assert.match(computed!.code, /__lumiana\d+\(file\)/);
+    assert.doesNotMatch(computed!.code, /require\(file\)/);
 
     const transformed = await transformSource(
       "import {read,add} from 'good';export const values=[read,add(1,2)];",
       'entry.js',
       {
-        place: async () => goodPlacement,
+        place: async () => ({}),
       },
     );
     assert.equal(transformed, null, 'bundlable package imports remain ordinary imports');
@@ -215,31 +309,19 @@ test('bundling is the default; Node built-ins are not grounds for excluding a pa
     const nativeApplication = await transformSource(
       "import create from 'native-package';const app=create();app.get('/',()=>42);app.listen(3000,()=>{});",
       'entry.js',
-      { place: async () => ({ native: true }) },
+      { place: async () => ({}) },
     );
-    assert.match(nativeApplication!.code, /\("native-package",undefined,\{"0":"default"\}\)/);
-    assert.equal(nativeApplication!.code.match(/invokeMember as/g)?.length, 1);
-    assert.equal(nativeApplication!.code.match(/__lumiana\d+\(app,"(?:get|listen)"/g)?.length, 2);
-    const ordered = await transformSource(
-      "import create from 'native-package';const app=create();app.get(argument());",
-      'entry.js',
-      { place: async () => ({ native: true }) },
-    );
-    assert.doesNotMatch(ordered!.code, /__lumiana\d+\(app,"get"/);
+    assert.equal(nativeApplication, null, 'application objects stay in the browser');
 
-    let dynamicUsage = false;
     const dynamicModule = await transformSource(
       'module.exports=name=>require(name);',
       'dynamic.cjs',
       {
-        place: async () => ({ native: false }),
-        nativeUsage: () => (dynamicUsage = true),
+        place: async () => ({}),
         origin: 'dynamic.cjs',
       },
     );
-    assert.equal(dynamicUsage, true);
-    assert.match(dynamicModule!.code, /nativeModule:__lumiana/);
-    assert.match(dynamicModule!.code, /\(name,null,"dynamic\.cjs"\)/);
+    assert.equal(dynamicModule, null, 'dynamic loading is not redirected to the Worker');
   } finally {
     await fs.rm(temp, { recursive: true, force: true });
   }

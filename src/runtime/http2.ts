@@ -1,8 +1,7 @@
-import { nativeRequire } from './bridge.js';
+import { unsupported } from './unsupported.js';
 
 const call = (name: string, args: any[]) => {
-  const fn = nativeRequire('node:http2', undefined, [name]);
-  return Reflect.apply(fn, undefined, args);
+  return unsupported('node:http2', name);
 };
 
 export const createServer = (...args: any[]) => call('createServer', args);

@@ -3,41 +3,23 @@ export const PREFIX = '/__lumiana/';
 export const encodePacket = (value: unknown): Uint8Array => encode(value);
 export const decodePacket = (bytes: Uint8Array): any => decode(bytes);
 export type Atom = null | boolean | number | string | { index: number };
-export interface Reference {
-  id: number;
-  kind: 'object' | 'array' | 'function' | 'promise' | 'symbol';
-  name?: string;
-  constructible?: boolean;
-}
 export type ValueNode =
   | { kind: 'undefined' }
   | { kind: 'bigint'; value: string }
   | { kind: 'symbol'; name: string; global: boolean }
   | { kind: 'object'; entries: [Atom, Atom][]; nullPrototype: boolean }
-  | { kind: 'binary'; name: string; bytes: Uint8Array }
-  | { kind: 'reference'; ref: Reference }
-  | { kind: 'return'; id: number };
+  | { kind: 'array'; items: Atom[] }
+  | { kind: 'date'; value: number }
+  | { kind: 'regexp'; source: string; flags: string }
+  | { kind: 'binary'; name: string; bytes: Uint8Array };
 export interface Graph {
   root: Atom;
   nodes: ValueNode[];
-  /** Reads to resume locally after reaching a value that crosses by copy. */
-  path?: string[];
 }
 export interface Invocation {
   operation: string;
   args: Graph[];
-  path?: string[];
 }
-export type NativeExpression =
-  | { kind: 'literal'; value: null | boolean | number | string }
-  | { kind: 'global'; name: string }
-  | { kind: 'get'; object: NativeExpression; key: string }
-  | {
-      kind: 'call';
-      object: NativeExpression;
-      key: string;
-      arguments: Record<string, NativeExpression>;
-    };
 export interface Failure {
   name: string;
   message: string;
@@ -71,8 +53,4 @@ export function restoreError(info: Failure): Error {
   if (info.stack) error.stack = info.stack;
   Object.assign(error, info.properties);
   return error;
-}
-
-export function restoreException(info: Failure, decode: (value: Graph) => unknown): any {
-  return info.thrown ? decode(info.thrown) : restoreError(info);
 }

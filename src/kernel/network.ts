@@ -1,4 +1,5 @@
 import net, { type Server, type Socket } from 'node:net';
+import WebSocket from 'ws';
 
 export type KernelEvent = (handle: number, event: string, ...args: any[]) => void;
 
@@ -7,6 +8,8 @@ export class NetworkKernel {
   private sequence = 0;
   private sockets = new Map<number, Socket>();
   private servers = new Map<number, Server>();
+  private websockets = new Map<number, WebSocket>();
+  private requests = new Map<string, AbortController>();
 
   constructor(
     private event: KernelEvent,
@@ -29,6 +32,12 @@ export class NetworkKernel {
     return server;
   }
 
+  private websocket(id: number): WebSocket {
+    const socket = this.websockets.get(id);
+    if (!socket) throw new ReferenceError(`Unknown WebSocket handle ${id}`);
+    return socket;
+  }
+
   private socketInfo(socket: Socket) {
     return {
       localAddress: socket.localAddress,
@@ -46,7 +55,13 @@ export class NetworkKernel {
     if (paused) socket.pause();
     socket.on('connect', () => this.event(handle, 'connect', this.socketInfo(socket)));
     socket.on('ready', () => this.event(handle, 'ready'));
-    socket.on('data', (data) => this.event(handle, 'data', new Uint8Array(data)));
+    socket.on('data', (data) =>
+      this.event(
+        handle,
+        'data',
+        typeof data === 'string' ? new TextEncoder().encode(data) : new Uint8Array(data),
+      ),
+    );
     socket.on('end', () => this.event(handle, 'end'));
     socket.on('drain', () => this.event(handle, 'drain'));
     socket.on('timeout', () => this.event(handle, 'timeout'));
@@ -72,9 +87,14 @@ export class NetworkKernel {
   async close(): Promise<void> {
     const servers = [...this.servers.values()];
     const sockets = [...this.sockets.values()];
+    const websockets = [...this.websockets.values()];
     this.servers.clear();
     this.sockets.clear();
+    this.websockets.clear();
     for (const socket of sockets) socket.destroy();
+    for (const socket of websockets) socket.terminate();
+    for (const request of this.requests.values()) request.abort();
+    this.requests.clear();
     await Promise.allSettled(
       servers.map(
         (server) =>
@@ -87,6 +107,61 @@ export class NetworkKernel {
 
   async execute(operation: string, args: any[]): Promise<any> {
     switch (operation) {
+      case 'fetch.request': {
+        const [token, url, input = {}] = args;
+        const controller = new AbortController();
+        this.requests.set(token, controller);
+        try {
+          const response = await fetch(url, { ...input, signal: controller.signal });
+          return {
+            body: new Uint8Array(await response.arrayBuffer()),
+            headers: Object.fromEntries(response.headers),
+            redirected: response.redirected,
+            status: response.status,
+            statusText: response.statusText,
+            url: response.url,
+          };
+        } finally {
+          this.requests.delete(token);
+        }
+      }
+      case 'fetch.abort':
+        this.requests.get(args[0])?.abort();
+        return undefined;
+      case 'websocket.open': {
+        const socket = new WebSocket(args[0], args[1]);
+        const handle = this.next();
+        this.websockets.set(handle, socket);
+        socket.on('open', () => this.event(handle, 'open'));
+        socket.on('message', (data, binary) =>
+          this.event(
+            handle,
+            'message',
+            !binary
+              ? data.toString()
+              : new Uint8Array(Buffer.isBuffer(data) ? data : Buffer.concat(data as Buffer[])),
+            binary,
+          ),
+        );
+        socket.on('error', (error) =>
+          this.event(handle, 'error', { name: error.name, message: error.message }),
+        );
+        socket.on('close', (code, reason) => {
+          this.websockets.delete(handle);
+          this.event(handle, 'close', code, reason.toString());
+        });
+        return { handle };
+      }
+      case 'websocket.send':
+        await new Promise<void>((resolve, reject) =>
+          this.websocket(Number(args[0])).send(args[1], (error) =>
+            error ? reject(error) : resolve(),
+          ),
+        );
+        return undefined;
+      case 'websocket.close':
+        this.websockets.get(Number(args[0]))?.close(args[1], args[2]);
+        return undefined;
       case 'net.connect': {
         const socket = new net.Socket();
         const handle = this.attachSocket(socket);

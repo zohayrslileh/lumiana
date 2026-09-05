@@ -6,14 +6,14 @@ import os from 'node:os';
 import path from 'node:path';
 import { once } from 'node:events';
 import { staticHandler } from '../dist/host.js';
-test('static files cannot escape the public root, including encoded paths and symlinks', async () => {
+test('static files cannot escape the client root, including encoded paths and symlinks', async () => {
   const temp = await fs.mkdtemp(path.join(os.tmpdir(), 'lumiana-static-'));
-  const publicDir = path.join(temp, 'public');
-  await fs.mkdir(publicDir);
-  await fs.writeFile(path.join(publicDir, 'index.html'), 'public');
+  const clientDir = path.join(temp, 'client');
+  await fs.mkdir(clientDir);
+  await fs.writeFile(path.join(clientDir, 'index.html'), 'client');
   await fs.writeFile(path.join(temp, 'secret.txt'), 'private');
-  await fs.symlink(path.join(temp, 'secret.txt'), path.join(publicDir, 'link.txt'));
-  const handle = staticHandler(publicDir);
+  await fs.symlink(path.join(temp, 'secret.txt'), path.join(clientDir, 'link.txt'));
+  const handle = staticHandler(clientDir);
   const server = http.createServer((req, res) => {
     void handle(req, res);
   });
@@ -35,7 +35,7 @@ test('static files cannot escape the public root, including encoded paths and sy
     });
   }
   try {
-    assert.equal((await get('/')).body, 'public');
+    assert.equal((await get('/')).body, 'client');
     for (const url of [
       '/../secret.txt',
       '/%2e%2e/secret.txt',
@@ -44,7 +44,7 @@ test('static files cannot escape the public root, including encoded paths and sy
       '/%5c..%5csecret.txt',
     ])
       assert.equal((await get(url)).status, 403, url);
-    assert.equal((await get('/route')).body, 'public');
+    assert.equal((await get('/route')).body, 'client');
     assert.equal((await get('/missing.js')).status, 404);
   } finally {
     await new Promise<void>((resolve) => server.close(() => resolve()));
@@ -55,17 +55,13 @@ test('static files cannot escape the public root, including encoded paths and sy
 test('connections own distinct workers, accept fragmented binary frames, and end together', async () => {
   const { attachHost } = await import('../dist/host.js');
   const { encodePacket, decodePacket } = await import('../src/protocol.js');
+  const { encodeValue, decodeValue } = await import('../src/values.js');
   const { WebSocket } = await import('ws');
   const server = http.createServer((req, res) => void host.handle(req, res));
   const host = attachHost(server, { root: process.cwd(), username: 'test', password: 'secret' });
   server.listen(0, '127.0.0.1');
   await once(server, 'listening');
   const base = `http://127.0.0.1:${(server.address() as any).port}`;
-  const atom = (value: any) => ({ root: value, nodes: [] });
-  const returning = (graph: any) => ({
-    root: { index: 0 },
-    nodes: [{ kind: 'return', id: graph.nodes[0].ref.id }],
-  });
   const sessions: any[] = [];
   async function session() {
     const response = await fetch(base + '/__lumiana/connect', {
@@ -89,7 +85,11 @@ test('connections own distinct workers, accept fragmented binary frames, and end
         const id = ++sequence;
         return new Promise((resolve) => {
           pending.set(id, resolve);
-          const bytes = encodePacket({ type: 'invoke', id, invocation: { operation, args } });
+          const bytes = encodePacket({
+            type: 'invoke',
+            id,
+            invocation: { operation, args: args.map(encodeValue) },
+          });
           if (fragment) {
             socket.send(bytes.subarray(0, 3), { fin: false });
             socket.send(bytes.subarray(3), { fin: true });
@@ -103,23 +103,19 @@ test('connections own distinct workers, accept fragmented binary frames, and end
   try {
     const a = await session(),
       b = await session();
-    const thread = async (s: any) => {
-      const module = await s.request('module', [atom('node:worker_threads')], true);
-      return (await s.request('get', [returning(module.value), atom('threadId')])).value.root;
-    };
+    const thread = async (s: any) =>
+      decodeValue((await s.request('kernelSync', ['system.threadId'], true)).value);
     const [first, second] = await Promise.all([thread(a), thread(b)]);
     assert.notEqual(first, second);
     const replies = await Promise.all(
-      Array.from({ length: 30 }, () => a.request('module', [atom('node:os')])),
+      Array.from({ length: 30 }, () => a.request('kernelSync', ['os.platform'])),
     );
     assert.ok(replies.every((p) => p.ok));
     const duplicate = new WebSocket(base.replace('http', 'ws') + '/__lumiana/ws?id=' + a.id);
     const [error] = await once(duplicate, 'error');
     assert.match(error.message, /409/);
-    const processModule = await a.request('module', [atom('node:process')]);
-    const exit = await a.request('get', [returning(processModule.value), atom('exit')]);
     const closed = once(a.socket, 'close');
-    void a.request('apply', [returning(exit.value), atom(null), atom(0)]);
+    a.socket.close();
     await closed;
     assert.equal(await thread(b), second);
     const ended = once(b.socket, 'close');

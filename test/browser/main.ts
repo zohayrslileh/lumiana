@@ -1,4 +1,4 @@
-import { lumiana, connect, node } from 'lumiana/client';
+import { lumiana, connect } from 'lumiana/client';
 const output = document.querySelector('#result')!;
 const checks: string[] = [];
 const check = (name: string, condition: boolean) => {
@@ -10,8 +10,9 @@ const nativeFetch = window.fetch,
   nativeSocket = window.WebSocket;
 try {
   let threw = false;
+  const fs = await import('node:fs/promises');
   try {
-    node('node:fs');
+    await fs.readFile('/not-connected');
   } catch {
     threw = true;
   }
@@ -24,26 +25,9 @@ try {
     'repeated credentials return the singleton',
     (await connect.credentials({ username: 'lumiana', password: 'lumiana' })) === lumiana,
   );
-  const runtime = node('../fixtures/runtime.cjs');
-  const instance = new runtime.Counter(7);
-  check(
-    'native constructor, identity and method receiver',
-    instance.add(1) === instance && instance.value === 8,
-  );
-  check('nested synchronous callback', runtime.callback((n: number) => n + instance.value) === 50);
-  check(
-    'native sort calls a synchronous browser comparator',
-    [...runtime.sort((a: number, b: number) => a - b)].join(',') === '1,2,3',
-  );
-  const binary = new Uint8Array(200_000).map((_, i) => i % 256),
-    echo = runtime.echo(binary);
-  check(
-    'compressed synchronous binary response',
-    echo.length === binary.length && echo.every((byte: number, i: number) => byte === binary[i]),
-  );
-  const fs = node('node:fs/promises'),
-    os = node('node:os'),
-    path = node('node:path');
+  const binary = new Uint8Array(200_000).map((_, i) => i % 256);
+  const os = await import('node:os'),
+    path = await import('node:path');
   const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'lumiana-binary-'));
   try {
     const file = path.join(dir, 'data.bin');
@@ -57,14 +41,7 @@ try {
   } finally {
     await fs.rm(dir, { recursive: true, force: true });
   }
-  check(
-    'native queued event after listener registration',
-    (await new Promise((resolve) => {
-      const emitter = runtime.create();
-      emitter.once('ready', resolve);
-    })) === 42,
-  );
-  const http = node('node:http');
+  const http = await import('node:http');
   const server = http.createServer((request: any, response: any) =>
     response.end(request.headers['user-agent']),
   );
@@ -82,17 +59,18 @@ try {
   );
   const status = await lumiana.status();
   check('status describes the main server', status.pid > 0 && status.connections >= 1);
-  const thread = node('node:worker_threads').threadId;
   lumiana.disconnect();
-  let stale = false;
+  let disconnected = false;
   try {
-    instance.value;
+    await lumiana.status();
   } catch {
-    stale = true;
+    disconnected = true;
   }
-  check('disconnect invalidates references', stale);
-  await connect.credentials({ username: 'lumiana', password: 'lumiana' });
-  check('reconnection creates a new worker', node('node:worker_threads').threadId !== thread);
+  check('disconnect invalidates host capabilities', disconnected);
+  check(
+    'reconnection returns the same browser instance',
+    (await connect.credentials({ username: 'lumiana', password: 'lumiana' })) === lumiana,
+  );
   lumiana.disconnect();
   output.textContent = JSON.stringify({ success: true, checks }, null, 2);
 } catch (error) {

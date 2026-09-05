@@ -4,7 +4,7 @@ import fs from 'node:fs/promises';
 import path from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { createServer } from 'vite';
-import { lumiana } from '../dist/index.js';
+import { lumiana } from '../dist/vite.js';
 
 test(
   'dev serves linked browser runtime files while preserving filesystem restrictions',
@@ -37,7 +37,7 @@ test(
           const runtime = (name: string) =>
             origin + '/@fs/' + path.resolve('dist', name).replaceAll('\\', '/');
           // Optimized dependencies can request these before the application import graph loads.
-          for (const name of ['access.js', 'client.js']) {
+          for (const name of ['browser.js']) {
             const response = await request(runtime(name));
             const code = await response.text();
             for (const [, dependency] of code.matchAll(/from ["'](\/node_modules\/[^"']+)["']/g)) {
@@ -52,7 +52,7 @@ test(
           const main = await request(origin + '/main.js');
           assert.equal(main.status, 200);
           const mainCode = await main.text();
-          assert.match(mainCode, /readPath/);
+          assert.doesNotMatch(mainCode, /readPath/);
           assert.match(mainCode, /runtime\/process\.js/);
           assert.match(mainCode, /runtime\/url\.js/);
           assert.ok(

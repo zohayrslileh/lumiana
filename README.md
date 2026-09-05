@@ -7,14 +7,6 @@ events. JavaScript behavior runs in the browser whenever it can. Operations that
 operating system are executed by a dedicated Node.js Worker and returned through the Lumiana
 connection.
 
-```mermaid
-flowchart LR
-  A[Hybrid application in browser] --> B[Local Node.js runtime]
-  B -->|filesystem, sockets, processes| C[Dedicated server Worker]
-  C -->|results and events| B
-  A --> D[DOM and browser APIs]
-```
-
 This means a library can retain its normal JavaScript identity in the browser while its file
 handles, listening sockets, child processes, and native implementations remain on the server.
 
@@ -29,12 +21,11 @@ Lumiana divides behavior by capability rather than by package name:
 - Asynchronous commands and events use the existing binary MessagePack WebSocket.
 - Synchronous Node operations remain synchronous and cross the boundary once when they require the
   Worker.
-- Unsupported native values are represented by references that preserve their owner and identity.
+- Operating-system resources are represented by local objects containing private capability handles.
 
-Packages are bundled by default. Importing a Node builtin does not make a package external because
-the package can consume Lumiana's browser-owned implementation of that builtin. A dependency stays
-on the server only when build analysis proves that it cannot be bundled, or when the user excludes
-it explicitly.
+Package JavaScript is bundled into the browser. Importing a Node builtin does not move a package to
+the server because the package consumes Lumiana's browser-owned implementation of that builtin.
+Only concrete operating-system commands cross the connection.
 
 There is no package allowlist.
 
@@ -55,7 +46,7 @@ Add the plugin to `vite.config.ts`:
 
 ```ts
 import { defineConfig } from 'vite';
-import { lumiana } from 'lumiana';
+import { lumiana } from 'lumiana/vite';
 
 export default defineConfig({
   plugins: [lumiana()],
@@ -98,7 +89,7 @@ need a special filename or directory.
 Import the browser API from `lumiana/client`:
 
 ```ts
-import { lumiana, connect, node, Buffer } from 'lumiana/client';
+import { lumiana, connect } from 'lumiana/client';
 ```
 
 ### `await connect.credentials(credentials)`
@@ -141,40 +132,18 @@ connection count, server time, and latency.
 ### `lumiana.disconnect()`
 
 Closes the connection, stops its dedicated Worker, rejects pending operations, and invalidates
-remote references. If the Worker stops first, the browser connection closes as well.
-
-### `node(specifier)`
-
-Explicitly resolves a native module through the connected Worker's Node resolver:
-
-```ts
-import { node } from 'lumiana/client';
-import { tmpdir } from 'node:os';
-
-const fs = node<typeof import('node:fs')>('node:fs');
-const exists = fs.existsSync(tmpdir());
-```
-
-`node()` can be called from any application module and throws when Lumiana is not connected. Normal
-Node imports remain the preferred form; `node()` is available when native resolution must be
-selected explicitly.
-
-### `Buffer`
-
-Lumiana exports the browser runtime's Node-compatible `Buffer`. Binary values cross the connection
-as bytes through MessagePack rather than being converted to text.
+host resource handles. If the Worker stops first, the browser connection closes as well.
 
 ## Plugin configuration
 
 ```ts
-import { lumiana } from 'lumiana';
+import { lumiana } from 'lumiana/vite';
 
 lumiana({
   defaultCredentials: {
     username: 'my-user',
     password: 'my-password',
   },
-  nodeModules: ['native-package', /^@company\/native-/],
 });
 ```
 
@@ -191,15 +160,14 @@ Environment variables take precedence:
 Credentials protect initial connection establishment. After authentication, messages route
 directly to that connection's Worker without per-operation allowlists.
 
-### `nodeModules`
+Lumiana owns dependency placement. Package JavaScript stays in the browser bundle. Node export
+conditions are selected when a dependency requires them, while operating-system and native-addon
+operations use runtime capability contracts.
 
-Explicitly excludes matching packages from the browser build. Entries may be exact package names
-or regular expressions.
-
-Every other package is bundled unless resolution or build analysis proves that it requires native
-execution. Native addons and other genuinely non-bundlable implementations remain server-owned.
-Dependency modules that request Node export conditions receive them without changing unrelated
-imports in the application's composition modules.
+Native `.node` imports are detected automatically. The package's JavaScript remains in the browser,
+and Lumiana includes the package that owns the binary in the production server. Native functions,
+instances, prototypes, and callbacks have local browser objects backed by private connection
+handles.
 
 ## Hybrid browser APIs
 
@@ -214,16 +182,16 @@ Explicit `window.fetch` and `window.WebSocket` always retain their browser imple
 Functions imported from a Node library retain that library's implementation. Locally declared
 bindings named `fetch` or `WebSocket` are not transformed.
 
-## Values and references
+## Values and capabilities
 
-Primitives and plain records cross by value. Plain records may contain cycles.
+JavaScript objects, functions, classes, callbacks, streams, and events stay in the browser. Values
+that form an operating-system command are copied across the boundary. This includes primitives,
+plain records, arrays, dates, regular expressions, binary views, and cyclic structures.
 
-Functions, arrays, class instances, symbols, and other non-plain values retain references to their
-owner. Passing a reference back restores the original value and identity. Promise settlement is
-mirrored into a local Promise while its native identity remains available for return trips.
-
-References live until the connection ends. Server logs, standard output, standard error, and
-uncaught errors are projected into the browser console.
+Local runtime objects keep private numeric handles for files, sockets, processes, and listeners.
+The handles identify operating-system resources; they are never exposed as JavaScript proxies.
+Server logs, standard output, standard error, and uncaught errors are projected into the browser
+console.
 
 ## Node runtime support
 
@@ -246,8 +214,9 @@ Child processes, file watchers, connections, and listeners expose browser-owned 
 Worker keeps their operating-system handles. `process.env`, `homedir()`, and `platform()` are local
 connection snapshots and make no request when read or serialized.
 
-Facades for `node:tty`, `node:perf_hooks`, `node:v8`, `node:vm`, `node:https`, `node:http2`, and
-`node:tls` keep supported JavaScript behavior local and delegate remaining native operations.
+`node:tty`, `node:perf_hooks`, `node:v8`, and `node:vm` provide their currently supported local
+behavior. `node:https`, `node:http2`, and `node:tls` currently report a clear unsupported runtime
+contract when an operational method is called.
 
 Static missing optional dependencies are recorded during the build. A local `createRequire()` then
 throws `MODULE_NOT_FOUND` without contacting the server, allowing the package's own fallback logic
@@ -272,7 +241,7 @@ npm run preview
 
 ```text
 dist/
-├── public/       browser application
+├── client/       browser application
 ├── server/       Lumiana host and Worker runtime
 ├── main.mjs      standalone entry
 └── package.json  production dependencies and start command
@@ -292,20 +261,17 @@ controls application minification through `build.minify`.
 
 ## Runtime constraints
 
-Network latency still exists when an operation crosses the boundary. A synchronous operation on an
-unsupported native reference uses synchronous XHR with MessagePack data; asynchronous reference
-and kernel traffic uses the binary WebSocket.
+Network latency still exists when an operation crosses the boundary. Synchronous operating-system
+commands use synchronous XHR with MessagePack data. Asynchronous commands and events use the
+binary WebSocket.
 
-A remote reference is a JavaScript proxy. Owner methods and constructors preserve their native
-receivers, but browser intrinsics cannot acquire another process's private engine slots. For
-example, call `remoteMap.get(key)` instead of `Map.prototype.get.call(remoteMap, key)`.
+Runtime-selected package names cannot be added to a browser bundle after it has been built, so a
+dynamic `require(name)` outside the statically included graph throws `MODULE_NOT_FOUND` locally.
+`vm.runInThisContext()` evaluates in the browser global realm; separate Node VM context semantics
+remain incomplete.
 
-Synchronous module loading retains Node's restriction on modules with top-level asynchronous
-initialization. Use asynchronous `import()` for those modules. `vm.runInThisContext()` evaluates in
-the browser global realm; separate Node VM context semantics remain incomplete.
-
-These are consequences of the process and network boundary. Lumiana keeps them visible instead of
-adding package-specific behavior or caching mutable reflection to conceal them.
+These are consequences of the process and network boundary. Lumiana reports a missing local
+runtime contract instead of silently moving a library into the Worker.
 
 ## Repository development
 
@@ -320,11 +286,11 @@ bun run typecheck
 bun run test
 ```
 
-To run the linked example from this checkout:
+To run the linked vanilla example from this checkout:
 
 ```sh
 bun link
-cd example
+cd examples/vanilla
 bun install
 bun run dev
 ```

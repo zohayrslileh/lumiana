@@ -255,7 +255,7 @@ export class FileKernel {
         await fs.rm(args[0], args[1]);
         return undefined;
       case 'fs.rmdir':
-        await fs.rmdir(args[0], args[1]);
+        await (fs.rmdir as (path: any, options?: any) => Promise<void>)(args[0], args[1]);
         return undefined;
       case 'fs.stat':
         return statRecord(await fs.stat(args[0], args[1]));

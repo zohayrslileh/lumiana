@@ -6,11 +6,12 @@ import { once } from 'node:events';
 import { pathToFileURL } from 'node:url';
 import { build, preview } from 'vite';
 import { WebSocket } from 'ws';
-import { lumiana } from '../dist/index.js';
+import { lumiana } from '../dist/vite.js';
 import { encodePacket, decodePacket } from '../src/protocol.js';
+import { decodeValue } from '../src/values.js';
 
 test(
-  'Vite preview serves the build and native handlers with the configured base and credentials',
+  'Vite preview serves the local runtime with the configured base and credentials',
   { timeout: 20_000 },
   async (t) => {
     const root = await fs.mkdtemp(path.join(process.cwd(), 'node_modules/.lumiana-preview-'));
@@ -25,16 +26,12 @@ test(
     try {
       await fs.writeFile(path.join(root, 'package.json'), '{"type":"module"}');
       await fs.writeFile(
-        path.join(root, 'handler.cjs'),
-        'module.exports = () => "native-preview";',
-      );
-      await fs.writeFile(
         path.join(root, 'index.html'),
         '<script type="module" src="/main.js"></script>',
       );
       await fs.writeFile(
         path.join(root, 'main.js'),
-        'import { Buffer } from "lumiana/client"; document.body.textContent = Buffer.from(import.meta.env.MODE === "production" ? "built-preview" : "wrong-mode").toString();',
+        'import { Buffer } from "node:buffer"; document.body.textContent = Buffer.from(import.meta.env.MODE === "production" ? "built-preview" : "wrong-mode").toString();',
       );
       for (const [base, outDir] of [
         ['/', 'dist'],
@@ -72,7 +69,7 @@ test(
           Object.assign(globalThis, { document });
           try {
             await import(
-              pathToFileURL(path.join(root, outDir!, 'public', asset.slice(base!.length))).href
+              pathToFileURL(path.join(root, outDir!, 'client', asset.slice(base!.length))).href
             );
             assert.equal(document.body.textContent, 'built-preview');
           } finally {
@@ -96,32 +93,7 @@ test(
           const received = once(socket, 'message');
           socket.send(encodePacket({ type: 'status', id: 1 }));
           const [data] = await received;
-          assert.equal(decodePacket(new Uint8Array(data)).value.pid, process.pid);
-
-          let sequence = 1;
-          const invoke = async (operation: string, args: any[]) => {
-            const response = await fetch(endpoint + 'sync', {
-              method: 'POST',
-              headers: { 'X-Lumiana-Session': id, 'Content-Type': 'application/msgpack' },
-              body: encodePacket({
-                type: 'invoke',
-                id: ++sequence,
-                sync: true,
-                invocation: { operation, args },
-              }) as Uint8Array<ArrayBuffer>,
-            });
-            assert.equal(response.status, 200);
-            const packet = decodePacket(Buffer.from(await response.text(), 'base64'));
-            assert.equal(packet.ok, true, packet.error?.message);
-            return packet.value;
-          };
-          const atom = (value: any) => ({ root: value, nodes: [] });
-          const handler = await invoke('module', [atom('./handler.cjs')]);
-          const reference = {
-            root: { index: 0 },
-            nodes: [{ kind: 'return', id: handler.nodes[0].ref.id }],
-          };
-          assert.equal((await invoke('apply', [reference, atom(null)])).root, 'native-preview');
+          assert.equal(decodeValue(decodePacket(new Uint8Array(data)).value).pid, process.pid);
 
           const closed = once(socket, 'close');
           await server.close();

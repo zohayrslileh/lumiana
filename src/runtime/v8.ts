@@ -1,55 +1,64 @@
-import { nativeCallSync, nativeConstructSync } from './bridge.js';
+import { Buffer } from 'buffer';
+import { encodePacket, decodePacket } from '../protocol.js';
+import { encodeValue, decodeValue } from '../values.js';
+import { unsupported } from './unsupported.js';
 
-const call =
+export const serialize = (value: any): Buffer => Buffer.from(encodePacket(encodeValue(value)));
+export const deserialize = (value: ArrayBuffer | ArrayBufferView): any => {
+  const bytes =
+    value instanceof ArrayBuffer
+      ? new Uint8Array(value)
+      : new Uint8Array(value.buffer, value.byteOffset, value.byteLength);
+  return decodeValue(decodePacket(bytes));
+};
+
+const unavailable =
   (name: string) =>
-  (...args: any[]) =>
-    nativeCallSync('node:v8', name.split('.'), args);
+  (..._args: any[]) =>
+    unsupported('node:v8', name);
 
-export const cachedDataVersionTag = call('cachedDataVersionTag');
-export const deserialize = call('deserialize');
-export const getCppHeapStatistics = call('getCppHeapStatistics');
-export const getHeapCodeStatistics = call('getHeapCodeStatistics');
-export const getHeapSnapshot = call('getHeapSnapshot');
-export const getHeapSpaceStatistics = call('getHeapSpaceStatistics');
-export const getHeapStatistics = call('getHeapStatistics');
-export const isStringOneByteRepresentation = call('isStringOneByteRepresentation');
-export const queryObjects = call('queryObjects');
-export const serialize = call('serialize');
-export const setFlagsFromString = call('setFlagsFromString');
-export const setHeapSnapshotNearHeapLimit = call('setHeapSnapshotNearHeapLimit');
-export const stopCoverage = call('stopCoverage');
-export const takeCoverage = call('takeCoverage');
-export const writeHeapSnapshot = call('writeHeapSnapshot');
-export const startCpuProfile = call('startCpuProfile');
+export const cachedDataVersionTag = unavailable('cachedDataVersionTag');
+export const getCppHeapStatistics = unavailable('getCppHeapStatistics');
+export const getHeapCodeStatistics = unavailable('getHeapCodeStatistics');
+export const getHeapSnapshot = unavailable('getHeapSnapshot');
+export const getHeapSpaceStatistics = unavailable('getHeapSpaceStatistics');
+export const getHeapStatistics = unavailable('getHeapStatistics');
+export const isStringOneByteRepresentation = unavailable('isStringOneByteRepresentation');
+export const queryObjects = unavailable('queryObjects');
+export const setFlagsFromString = unavailable('setFlagsFromString');
+export const setHeapSnapshotNearHeapLimit = unavailable('setHeapSnapshotNearHeapLimit');
+export const stopCoverage = unavailable('stopCoverage');
+export const takeCoverage = unavailable('takeCoverage');
+export const writeHeapSnapshot = unavailable('writeHeapSnapshot');
+export const startCpuProfile = unavailable('startCpuProfile');
 
-const construct = (name: string) =>
-  class {
-    constructor(...args: any[]) {
-      return nativeConstructSync('node:v8', [name], args);
-    }
-  };
+class UnsupportedSerializer {
+  constructor() {
+    unsupported('node:v8', new.target.name);
+  }
+}
 
-export const Serializer = construct('Serializer');
-export const Deserializer = construct('Deserializer');
-export const DefaultSerializer = construct('DefaultSerializer');
-export const DefaultDeserializer = construct('DefaultDeserializer');
-export const GCProfiler = construct('GCProfiler');
+export class Serializer extends UnsupportedSerializer {}
+export class Deserializer extends UnsupportedSerializer {}
+export class DefaultSerializer extends UnsupportedSerializer {}
+export class DefaultDeserializer extends UnsupportedSerializer {}
+export class GCProfiler extends UnsupportedSerializer {}
 
 export const promiseHooks = {
-  createHook: call('promiseHooks.createHook'),
-  onInit: call('promiseHooks.onInit'),
-  onBefore: call('promiseHooks.onBefore'),
-  onAfter: call('promiseHooks.onAfter'),
-  onSettled: call('promiseHooks.onSettled'),
+  createHook: unavailable('promiseHooks.createHook'),
+  onInit: unavailable('promiseHooks.onInit'),
+  onBefore: unavailable('promiseHooks.onBefore'),
+  onAfter: unavailable('promiseHooks.onAfter'),
+  onSettled: unavailable('promiseHooks.onSettled'),
 };
 export const startupSnapshot = {
-  addSerializeCallback: call('startupSnapshot.addSerializeCallback'),
-  addDeserializeCallback: call('startupSnapshot.addDeserializeCallback'),
-  setDeserializeMainFunction: call('startupSnapshot.setDeserializeMainFunction'),
-  isBuildingSnapshot: call('startupSnapshot.isBuildingSnapshot'),
+  addSerializeCallback: unavailable('startupSnapshot.addSerializeCallback'),
+  addDeserializeCallback: unavailable('startupSnapshot.addDeserializeCallback'),
+  setDeserializeMainFunction: unavailable('startupSnapshot.setDeserializeMainFunction'),
+  isBuildingSnapshot: unavailable('startupSnapshot.isBuildingSnapshot'),
 };
 
-const runtime = {
+export default {
   cachedDataVersionTag,
   DefaultDeserializer,
   DefaultSerializer,
@@ -73,5 +82,3 @@ const runtime = {
   takeCoverage,
   writeHeapSnapshot,
 };
-
-export default runtime;

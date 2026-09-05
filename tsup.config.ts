@@ -1,9 +1,9 @@
 import { defineConfig } from 'tsup';
 export default defineConfig({
   entry: {
-    index: 'src/index.ts',
+    vite: 'src/vite.ts',
     client: 'src/client.ts',
-    access: 'src/access.ts',
+    browser: 'src/browser.ts',
     host: 'src/host.ts',
     worker: 'src/worker.ts',
     'runtime/child-process': 'src/runtime/child-process.ts',
@@ -32,7 +32,11 @@ export default defineConfig({
   splitting: false,
   dts: true,
   clean: true,
+  banner: {
+    js: "const require=globalThis.process?.getBuiltinModule?.('node:module').createRequire(import.meta.url);",
+  },
+  removeNodeProtocol: false,
   target: 'node20',
-  external: ['vite', 'esbuild', 'ws'],
-  noExternal: ['@msgpack/msgpack', 'import-meta-resolve', 'process'],
+  external: ['vite', 'esbuild', './browser.js'],
+  noExternal: ['@msgpack/msgpack', 'import-meta-resolve', 'process', 'ws'],
 });

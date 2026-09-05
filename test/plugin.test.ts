@@ -3,8 +3,8 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import { build } from 'vite';
-import { lumiana } from '../dist/index.js';
-test('Vite builds browser packages and deploys only proven or explicit native dependencies', async (t) => {
+import { lumiana } from '../dist/vite.js';
+test('Vite keeps package JavaScript local and deploys only detected native addons', async (t) => {
   const previous = [process.env.LUMIANA_USERNAME, process.env.LUMIANA_PASSWORD];
   t.after(() => {
     for (const [i, key] of ['LUMIANA_USERNAME', 'LUMIANA_PASSWORD'].entries()) {
@@ -52,7 +52,9 @@ test('Vite builds browser packages and deploys only proven or explicit native de
     );
     await pkg('node-environment-library', {
       'index.js':
-        "const assert=require('node:assert');const path=require('node:path');const process=require('node:process');const querystring=require('node:querystring');const {PassThrough}=require('node:stream');module.exports=()=>{assert.equal(path.join('a','b'),'a/b');assert.equal(querystring.stringify({a:1}),'a=1');const stream=new PassThrough();return process.browser&&stream instanceof PassThrough?'node-environment-proof':'broken'};",
+        "const assert=require('node:assert');const path=require('node:path');const process=require('node:process');const querystring=require('node:querystring');const {PassThrough}=require('node:stream');const nested=require('./nested');module.exports=()=>{assert.equal(path.join('a','b'),'a/b');assert.equal(querystring.stringify({a:1}),'a=1');const stream=new PassThrough();return process.browser&&stream instanceof PassThrough&&nested()?'node-environment-proof':'broken'};",
+      'nested.js':
+        "module.exports=()=>process.platform&&typeof setImmediate==='function'?'transitive-node-proof':'';",
     });
     await pkg(
       'socket-library',
@@ -86,7 +88,7 @@ test('Vite builds browser packages and deploys only proven or explicit native de
       'node-adapter',
       {
         'index.js':
-          "import server from 'universal-server';process.on('beforeExit',()=>{});export default server;",
+          "import process from 'node:process';import server from 'universal-server';process.on('beforeExit',()=>{});export default server;",
       },
       { type: 'module' },
     );
@@ -129,12 +131,11 @@ test('Vite builds browser packages and deploys only proven or explicit native de
       plugins: [
         lumiana({
           defaultCredentials: { username: 'build-user', password: 'build-password' },
-          nodeModules: ['explicit'],
         }),
       ],
       build: { minify: false, target: 'esnext' },
     });
-    const assets = path.join(root, 'dist/public/assets');
+    const assets = path.join(root, 'dist/client/assets');
     const output = (
       await Promise.all(
         (await fs.readdir(assets)).map((f) => fs.readFile(path.join(assets, f), 'utf8')),
@@ -145,25 +146,24 @@ test('Vite builds browser packages and deploys only proven or explicit native de
       'cjs-proof',
       'inheritance-proof',
       'node-environment-proof',
+      'transitive-node-proof',
       'filesystem-runtime-proof',
       'socket-runtime-proof',
       'browser-condition-proof',
       'node-condition-server',
+      'node-server-proof',
+      'explicit-proof',
     ])
       assert.ok(output.includes(text), text);
     assert.ok(!output.includes('service-worker-server'));
     assert.ok(!output.includes('"node:util"'));
-    for (const text of [
-      'browser-client-proof',
-      'node-server-proof',
-      'binary native-proof',
-      'explicit-proof',
-    ])
+    assert.doesNotMatch(output, /process\.platform\s*&&\s*typeof setImmediate/);
+    for (const text of ['browser-client-proof', 'binary native-proof'])
       assert.ok(!output.includes(text), text);
     const manifest = JSON.parse(await fs.readFile(path.join(root, 'dist/package.json'), 'utf8'));
     assert.equal(manifest.dependencies['native-addon'], '1.0.0');
-    assert.equal(manifest.dependencies.explicit, '1.0.0');
-    assert.equal(manifest.dependencies['conditional-server'], '1.0.0');
+    assert.equal(manifest.dependencies.explicit, undefined);
+    assert.equal(manifest.dependencies['conditional-server'], undefined);
     assert.equal(manifest.dependencies.portable, undefined);
     assert.equal(manifest.dependencies['filesystem-library'], undefined);
     assert.equal(manifest.dependencies['socket-library'], undefined);

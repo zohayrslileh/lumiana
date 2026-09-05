@@ -1,158 +1,125 @@
 # Project memory
 
-The user designated `agent/` as the assistant's project memory on 2026-09-05.
-Read this file when resuming work. Keep durable decisions, findings, and remaining
-work here. Verify details against source and never store credentials or secrets.
+The user designated `agent/` as the assistant's project memory on 2026-09-05. Read this file when
+resuming work. Verify details against source and never store credentials or secrets.
 
 ## Working agreements
 
-- Use Bun 1.3.14 for package management and scripts. Node.js remains the runtime;
-  use `bun run test`, not `bun test`.
-- The example consumes this checkout through `lumiana: "link:lumiana"`. Build and
-  register the root with `bun link` before installing the example.
-- Keep the public API small and preserve it while the runtime changes.
-- Explain causes and contracts. Do not fix consumers with package-name exceptions,
-  allowlists, cached reflection, or other behavior-changing workarounds.
-- The browser owns everything that JavaScript can implement locally. Only operating
-  system operations and genuinely native implementations cross the connection.
-- Instances consume runtime contracts; Express, Elysia, Fastify, Hono, and other
-  packages must never define shared abstractions.
+- Use Bun 1.3.14 for package management and scripts. Node.js remains the deployed runtime. Use
+  `bun run test`, not `bun test`.
+- Keep the public API small. Explain causes and contracts. Do not add package-name exceptions,
+  allowlists, or consumer-specific runtime behavior.
+- The browser owns all JavaScript that can execute locally. Only operating-system commands and
+  native-addon operations cross the connection.
+- A concrete package consumes a runtime contract; Express, Elysia, Fastify, Hono, PhreshOS, and
+  other packages never define shared abstractions.
+- The examples consume the checkout through `lumiana: "link:lumiana"`. Build and register the root
+  with `bun link` before reinstalling an example.
 - The user authorizes routine project work without repeated confirmation.
 
 ## Public contract
 
-- `lumiana()` from `lumiana` is the Vite plugin.
-- `lumiana`, `connect`, `node`, and `Buffer` are exported from `lumiana/client`.
-- `await connect.credentials({ username, password, url? })` activates and returns
-  the single browser-context instance. Repeating the same connection returns it;
-  concurrent or different active connections throw.
-- `lumiana.status()` reports the main server status. `lumiana.disconnect()` ends
-  the connection and its dedicated Worker. Either side stopping stops the other.
-- Imports remain ordinary Node package/builtin imports. `node(specifier)` is an
-  optional explicit native resolver and rejects before connection.
-- Credentials are configured under `defaultCredentials`. `LUMIANA_USERNAME` and
-  `LUMIANA_PASSWORD` override them. Standalone production uses `LUMIANA_HOST` and
-  `LUMIANA_PORT`.
-- `nodeModules` explicitly excludes matching packages. Other packages are bundled
-  unless resolution or build analysis proves they cannot be bundled. Importing a
-  Node builtin alone is never grounds for exclusion.
-- Vite dev, Vite preview, and standalone deployment are supported.
+- `lumiana()` is imported from `lumiana/vite`.
+- `lumiana` and `connect` are imported from `lumiana/client`.
+- `await connect.credentials({ username, password, url? })` activates and returns the single
+  browser-context instance. The same active connection returns that instance. Concurrent or
+  different active connections throw.
+- Accessing the instance or a runtime capability before connection throws. `lumiana.status()`
+  reports the main server. `lumiana.disconnect()` ends the connection and its dedicated Worker.
+- Plugin credentials live in `defaultCredentials`. `LUMIANA_USERNAME` and `LUMIANA_PASSWORD`
+  override them. Standalone production also reads `LUMIANA_HOST` and `LUMIANA_PORT`.
+- There is no `node()`, public `Buffer`, root `lumiana` entry, `nodeModules` option, package
+  allowlist, or manual externalization API.
+- Vite development, Vite preview, and standalone production are supported.
 
 ## Architecture
 
-- Work is on branch `runtime/remote-kernel`; the first kernel milestone is commit
-  `ed89f9f`.
-- The browser-owned runtime contains ordinary local objects, constructors, streams,
-  event emitters, callbacks, and binary buffers. The Worker owns opaque operating
-  system handles. Kernel commands/events use the existing binary MessagePack
-  WebSocket and close with their connection.
-- Runtime contracts currently exist for callback, Promise, synchronous, stream,
-  and watcher forms of `node:fs`; `node:net`; `node:child_process`; and the HTTP
-  server half of `node:http`. Filesystem handles, watchers, child processes,
-  TCP/Unix sockets, and HTTP listeners live in the Worker; all surrounding
-  JavaScript behavior is local.
-- Pure/local builtins currently include assert, buffer, crypto, events, module,
-  path, process state, querystring, stream, stream/promises, string_decoder,
-  timers, url, util, and zlib. Crypto fills arbitrary-sized binary views by
-  respecting Web Crypto's 65,536-byte call limit.
-- `node:https`, `node:http2`, and `node:tls` expose local import-time facades. Their
-  current operational methods still use native execution because their socket and
-  protocol runtime domains have not yet been implemented locally.
-- Implicit `process` is a stable local object initialized from a plain snapshot at
-  authenticated connection. `process.env` is a null-prototype object; reads and
-  `JSON.stringify(process.env)` make zero boundary calls.
-- `node:module` has a local `createRequire`. The compiler preserves each source
-  module's origin. Supported CommonJS builtins return local constructors. Static
-  missing optional dependencies are proven at build time and throw local
-  `MODULE_NOT_FOUND`, allowing a package's own JavaScript fallback without a call.
-- `node:url` is a local runtime facade for WHATWG and legacy URL behavior. The
-  compiler gives binding-proven `fileURLToPath(import.meta.url)` calls the native
-  source file URL; unrelated browser `import.meta.url` expressions keep their
-  browser meaning. This module identity must come from the build because hashed
-  production asset URLs cannot recover an original source path.
-- `node:util` owns a local, process-wide `util.promisify.custom` contract using
-  `Symbol.for('nodejs.util.promisify.custom')`. `child_process.exec` and
-  `execFile` use it to return `{ stdout, stderr }` Promises with an immediate
-  `.child` handle, matching Node while all child lifecycle traffic stays on the
-  established WebSocket.
-- Dependency modules that explicitly consume the Node execution contract resolve
-  their dependencies with Node export conditions. Application composition roots
-  retain browser conditions for unrelated imports. This selects Node adapters
-  from conditional packages through source semantics, without package names.
-- `global` resolves to `globalThis`. Unbound `setImmediate`/`clearImmediate` use the
-  local timer runtime. Dynamic or genuinely native module resolution stays remote.
-- Unqualified `fetch` and `WebSocket` use hybrid routing: same-origin stays in the
-  browser and other origins execute remotely. Explicit `window.*` stays local.
-- Primitive values and plain records copy. Functions, class instances, symbols,
-  arrays, and other non-plain values retain owner references. Binary values remain
-  binary through MessagePack.
+- Package JavaScript, module state, classes, callbacks, streams, and events stay in the browser.
+  The Worker never loads ordinary package JavaScript as an execution fallback.
+- Primitive values, data-only records, arrays, dates, regular expressions, and binary views copy
+  through MessagePack. Cycles are retained. Functions and behavioral objects are rejected by the
+  value boundary and require an explicit capability contract.
+- Browser-owned runtime objects contain private, connection-owned handles for files, watchers,
+  child processes, TCP/Unix sockets, HTTP listeners, WebSockets, and native-addon resources.
+- Async commands and events use the established binary WebSocket. Inherently synchronous Node
+  operations use one synchronous HTTP call. Large synchronous replies are gzip compressed.
+- Native `.node` imports are detected automatically. Package JavaScript stays bundled; only the
+  package owning the binary is added to the production server manifest. Native entry points and
+  returned native resources have local browser objects backed by private handles. Callback
+  capabilities preserve browser callback identity and support synchronous and asynchronous addon
+  callbacks.
+- Static CommonJS addon-locator calls such as `require(loader)('binding.node')` are resolved from
+  the installed package at build time. This is based on call shape and matching binary evidence,
+  never a loader or consumer package name. The result uses the same native-addon capability as a
+  direct `.node` import.
+- If an addon loader computes its final `.node` path and passes it to dynamic `require`, Lumiana
+  keeps the path computation local and transforms the load only when the module has statically
+  verified installed-addon evidence. Discovery prefers an exact basename, then a single binary for
+  the build platform and architecture, and rejects ambiguity. Dynamic JavaScript module loading is
+  not redirected.
+- Dependency modules that explicitly consume the Node execution contract resolve their own
+  conditional dependencies with Node conditions. A required export missing from a browser entry
+  may select the package's Node entry, which is still bundled for the browser. This uses source and
+  transitive export evidence from the active Vite resolver, never package names. Re-exported browser
+  capabilities must be followed before deciding an export is missing.
+- Bare and `node:` builtin specifiers establish the same Node execution provenance. Older CommonJS
+  packages often use `require('fs')`; this must propagate Node globals and resolution exactly like
+  `require('node:fs')`.
+- Ambient dependency probes such as `typeof process` and `typeof setImmediate` remain browser-owned.
+  Vite owns `process.env.NODE_ENV`. Lumiana injects implicit Node globals into application modules
+  and dependencies with explicit Node provenance; it never infers ownership from a package name or
+  a guarded global access.
+- Node provenance propagates across every resolved dependency edge of a selected local Node
+  contract, including relative files and helper packages. This keeps its complete implementation
+  graph in one execution domain without affecting ordinary browser dependency graphs.
+- Unknown Node builtin domains fail clearly at build time. They do not make the importing package
+  Worker-owned.
+- Stable `process` and `node:os` information is copied once during connection. `process.env` is a
+  local null-prototype object; property reads and `JSON.stringify(process.env)` make no calls.
+- Unqualified `fetch` and `WebSocket` use hybrid routing. Same-origin traffic stays in the browser;
+  other origins use the native network capability. Explicit `window.fetch` and `window.WebSocket`
+  stay in the browser.
 
-## Validation and findings
+## Implemented runtime domains
 
-- Real Express 5 runs with its application graph local and zero synchronous XHR at
-  startup. HTTP requests reach the Worker listener and execute browser callbacks.
-- Real Fastify 5 serves successfully after keeping `util.inherits`, constructors,
-  and prototype mutation in one local identity domain.
-- Real Elysia 1.4 with `@elysia/node` works in Vite 8 dev and preview. Its source
-  selects the Node `srvx` adapter, `GET /` returns `200 Hello Elysia`, and startup
-  now makes zero synchronous boundary calls (previously 26).
-- HTTP response handles remain valid until the browser stream's ordered `end()`
-  command completes. A declared content length can make Node emit `close` before
-  that command arrives. Writes acknowledge immediately when Node reports no
-  backpressure; this removes the close/end race without hiding invalid writes.
-- Elysia's 26 calls were not one problem: global/timer reflection, crypto/zlib and
-  stream imports, TLS/HTTP facades, and two absent CrossWS accelerators. Local
-  runtime contracts removed the first groups. Build-time module availability
-  removed `bufferutil` and `utf-8-validate` calls by preserving CrossWS's own
-  fallback semantics.
-- The canonical suite passes 24 tests, including CommonJS format preservation,
-  1 MiB local random fill, binary
-  gzip round trips, local URL conversion, source-module identity, and local failure
-  of statically absent optional dependencies. Type checking and the production
-  example build pass.
-- CommonJS sources must never receive injected ESM imports or browser runtime
-  `require()` calls. Connection-dependent helpers are read from the internal
-  `Symbol.for('lumiana.runtime')` browser-context registry initialized by the
-  client. The reference-reader primitive bootstraps independently through
-  `Symbol.for('lumiana.readPath')` and its shared WeakMap, avoiding a cycle when
-  the client itself loads CommonJS dependencies such as `buffer`.
-- The real `@phreshos/node` 0.1.15 example builds and runs in Vite 8. After local
-  builtin module acquisition, OS snapshots, and the full `node:fs` facade, its
-  startup makes 2 synchronous calls instead of 28. They are exactly the actual
-  `existsSync()` and `realpathSync()` filesystem decisions. Its Unix-socket
-  connection and `program.list()` remain on WebSocket.
-- A packet-level trace accounted for the original 28 PhreshOS calls: 10 static native binding
-  loads (`fs`, `os`, and `child_process`), 7 whole-module loads from AdmZip/Jiti
-  (`fs`, `os`, `v8`, `tty`, `perf_hooks`, and `vm`), 7 Jiti compatibility/reflection
-  operations, and 4 actual startup calls (two `homedir()`, `existsSync()`, and
-  `realpathSync()`). The Unix-socket connection and `program.list()` use the async
-  MessagePack WebSocket and add no synchronous XHR. The package root re-exports
-  Project/storage/shell modules and has no `sideEffects: false`, while eager remote
-  binding acquisition is itself a side effect, so the bundler cannot discard those
-  otherwise unused paths. Local builtin module objects should remove the 24 setup
-  calls; local OS snapshots remove `homedir`, leaving the genuinely synchronous
-  filesystem decisions for the general transaction/async-lifting design. This
-  prediction is now verified by the real production bundle.
-- Kernel operation arrays have their own copy contract in `kernel-transfer.ts`.
-  Ordinary application arrays remain references, while arrays that constitute
-  kernel arguments or results reconstruct locally. This removed hidden reflection
-  calls discovered by the child-process and filesystem callback tests.
-- Child-process spawn, binary stdout/stderr, lifecycle events, stdin, IPC commands,
-  kill, and ref state use WebSocket with a browser-owned `ChildProcess` and local
-  streams. Only `spawnSync`/`execSync`/`execFileSync` use the synchronous path.
-- Stable `node:os` identity is a connection snapshot. Live values (`freemem`,
-  `loadavg`, and process priority) retain one synchronous host query. `node:tty`,
-  `node:perf_hooks`, `node:v8`, and `node:vm` now have local import-time facades;
-  separate VM-context semantics remain incomplete.
+- `node:fs`: callback, Promise, synchronous, stream, and watcher forms.
+- `node:net`: TCP and Unix sockets with local Socket and Server objects.
+- `node:http`: server-side listener, request, and response objects.
+- `node:child_process`: local lifecycle objects, streams, callbacks, Promise customization, IPC
+  commands, and synchronous variants.
+- Local or snapshot-backed `assert`, `buffer`, `crypto`, `events`, `module`, `os`, `path`,
+  `perf_hooks`, `process`, `querystring`, `stream`, `stream/promises`, `string_decoder`, `timers`,
+  `tty`, `url`, `util`, `v8` serialization, `vm` basics, and `zlib`.
+- Hybrid Fetch and WebSocket with binary transport and abort support.
+
+## Verified findings
+
+- Express 5, Fastify 5, Elysia 1.4 with `@elysia/node`, Hono, and PhreshOS were used to discover
+  general runtime gaps. They remain consumers, not implementation branches.
+- Express runs its application graph locally with zero synchronous startup calls. Elysia startup
+  was reduced from 26 synchronous calls to zero by implementing missing local contracts rather
+  than batching reflection. Fastify works because constructors and prototype mutation share one
+  local identity domain.
+- PhreshOS startup was reduced from 28 synchronous calls to the two real filesystem decisions,
+  `existsSync()` and `realpathSync()`. Its Unix-socket traffic uses WebSocket.
+- `process.env` serialization performs zero boundary calls. Large random fills are chunked around
+  Web Crypto's 65,536-byte per-call limit.
+- CommonJS sources never receive ESM syntax. Connection runtime helpers use the private
+  `Symbol.for('lumiana.runtime')` registry.
+- CommonJS `__filename` and `__dirname` are local module metadata. Their build-relative origins are
+  resolved against the connection's module root, separately from `process.cwd()`, so reads make no
+  boundary call and production paths remain relocatable regardless of the launch directory.
+- The value serializer must reject object-shaped behavior. Class prototypes can have
+  `Object.prototype` while carrying non-enumerable methods; copying them as records breaks
+  prototypes and `instanceof`.
 
 ## Remaining runtime domains
 
-- Complete file-descriptor mutation semantics, incremental file streams, directory
-  handles, recursive watcher parity, and complete filesystem metadata.
-- HTTP clients, upgrades, full backpressure, TLS and HTTP/2 local object models.
-- DNS, UDP, worker threads, async context, and process lifecycle. Child-process
-  advanced stdio, IPC handle transfer, and exact exec error metadata remain.
-- Native-addon adapters and broader compatibility fixtures for server, filesystem,
-  socket, and native-environment packages.
-- A general asynchronous transaction/compiler model for synchronous-looking source
-  operations that must cross. Existing synchronous native references still use XHR.
+- Complete file-descriptor mutation, incremental file streams, directory handles, recursive
+  watcher parity, and full filesystem metadata.
+- HTTP clients and upgrades, full backpressure, TLS, and HTTP/2.
+- DNS, UDP, worker threads, async context, and process lifecycle.
+- Complete VM context semantics, V8 introspection, advanced child-process stdio and error metadata,
+  and broader real native-addon fixtures.
+- A general compiler transaction model that can lift synchronous-looking source into asynchronous
+  WebSocket operations where program semantics permit it.

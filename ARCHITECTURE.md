@@ -1,37 +1,132 @@
 # Lumiana architecture
 
-The implementation separates contracts from the libraries that consume them. A watcher, stream, HTTP server, class instance, or callback is a value handled by the reference contract; none defines that contract.
+Lumiana separates JavaScript execution from host capabilities. Package JavaScript executes in the
+browser. The Node.js Worker performs only operations that require its operating system or a native
+addon. A package is a consumer of these contracts and never determines their shape.
 
-| Domain           | Contract                                                                                                                                                       | Implementation             |
-| ---------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------- | -------------------------- |
-| Module placement | Preserve browser bundling unless explicit configuration or build evidence requires native execution. Preserve resolution origin and browser export conditions. | `build.ts`, `index.ts`     |
-| Values           | Copy primitive values and plain record graphs; retain other identities; carry binary data as bytes.                                                            | `values.ts`, `protocol.ts` |
-| References       | Reflect operations against the original owner, including receivers, constructors, symbols, descriptors, and integrity operations.                              | `references.ts`            |
-| Browser context  | One inactive/active singleton and at most one connection establishment.                                                                                        | `client.ts`                |
-| Connection       | Bind all traffic to one Worker and link their lifetimes. Authenticate once at establishment.                                                                   | `host.ts`                  |
-| Runtime kernels  | Keep JavaScript objects local and represent operating-system resources with connection-owned opaque handles.                                                   | `runtime/*`, `kernel/*`    |
-| Native execution | Execute handlers, preserve synchronous callback returns, and mirror promise settlement.                                                                        | `worker.ts`                |
+| Domain        | Contract                                                                                                                         | Implementation                       |
+| ------------- | -------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------ |
+| Bundle        | Keep package JavaScript local, select the usable conditional export, and replace Node builtins with local runtime modules.       | `build.ts`, `vite.ts`                |
+| Local runtime | Provide real browser objects, constructors, callbacks, streams, events, and module state.                                        | `browser.ts`, `runtime/*`            |
+| Values        | Copy data graphs while preserving cycles and binary bytes. Reject JavaScript behavior at the boundary.                           | `values.ts`, `protocol.ts`           |
+| Capabilities  | Identify connection-owned files, processes, listeners, sockets, and native-addon resources with opaque numeric handles.          | `runtime/*`, `kernel/*`              |
+| Transport     | Send asynchronous commands and events over MessagePack WebSocket; send inherently synchronous commands through synchronous HTTP. | `browser.ts`, `host.ts`, `worker.ts` |
+| Connection    | Authenticate once, create one Worker, and bind the browser session and Worker lifetime together.                                 | `browser.ts`, `host.ts`              |
 
-The dependency direction is explicit: Vite resolves and transforms imports; the client and Worker consume the same reference and value contracts; the host routes messages without interpreting particular libraries or methods. Development and production use the same host and Worker files.
+## Ownership
 
-A synchronous call sends a binary MessagePack invocation over XHR. Its result returns through a gzip-compressed Base64 envelope when sufficiently large. If native execution invokes a browser callback, the HTTP response carries that callback instead. The browser executes it, then supplies its result through a continuation request. Nested calls use distinct request identities. The Worker waits with `Atomics.wait` and drains its message port, so these nested operations can execute while the original native stack remains intact.
+An imported package, its module state, its classes, and the objects it creates belong to the
+browser. Lumiana does not load that package again in the Worker and does not create a general
+remote-object graph. This gives all local consumers the same identity and prototype domain.
 
-The caller owns a synchronous turn. A queued browser microtask releases it after the synchronous stack completes. Until that release, the Worker processes further invocations without advancing its native event loop. A callback wait is already a reentrant pump and does not add another turn hold. This is what preserves listener registration order without event replay or special treatment for readiness events.
+Objects such as `Server`, `Socket`, `ChildProcess`, and `FSWatcher` are also constructed in the
+browser. A private handle inside each object names the corresponding operating-system resource in
+the Worker. Methods translate Node contracts into capability commands; Worker events update or
+invoke the local object.
 
-Promises returned by arbitrary native references return immediately as references. Export observes the original rejection immediately; import subscribes to settlement and creates the local Promise. This transfers rejection reporting to the receiving runtime before transport latency could cause a premature unhandled rejection in the owner. Runtime-kernel promises are browser-owned and carry their command and settlement over binary MessagePack WebSocket.
+Stable host information such as `process.env` and most of `node:os` arrives as a connection
+snapshot. Reading or serializing it is therefore local. Live information and mutations cross the
+boundary when requested.
 
-A reference returning to its owner decodes to the original object. Each session caches exported and imported identities, so listener removal, method receivers, and repeated returns use the same objects. Disconnect clears those stores. Proxy targets distinguish callable, constructible, array, and object values. Descriptor mirroring satisfies JavaScript's non-configurable and non-extensible proxy invariants.
+## Boundary values
 
-An invocation can carry a path of property reads. The owner executes consecutive reads while their intermediate results remain owned references. At a copied value or a reference returning to the caller, the response carries the remaining path for local evaluation. This preserves record snapshots, primitive and binary behavior, getters, errors, and reference identity without caching property values. Native callbacks still use the existing continuation protocol.
+Primitives, data-only records, arrays, dates, regular expressions, and binary views are copied.
+MessagePack carries binary values as bytes. Cycles and repeated identities inside one copied graph
+are preserved.
 
-Portable intrinsic expressions can cross as an operation graph instead of exposing their native inputs to browser reflection one trap at a time. The graph contains only copied records and literals, so it is part of the invocation rather than another reference tree. The owner evaluates reads and the intrinsic call in order and returns the normal value graph. The browser uses this path only while the intrinsic still has its captured identity; replacing the intrinsic preserves the replacement and falls back to ordinary reference behavior. Runtime snapshots such as `process.env` bypass this path because both the value and intrinsic execution are already local.
+Functions, class instances, accessors, and objects with behavioral property descriptors are not
+copy values. A capability contract must describe the operation that uses them. This rule prevents
+the serializer from silently stripping prototypes, methods, or descriptors.
 
-Kernel commands form a data contract rather than an application reference graph. Their arrays represent operation arguments and results, so `kernel-transfer.ts` explicitly copies them as tagged records before the general value contract runs and reconstructs local arrays afterward. Arrays passed through ordinary application APIs retain reference identity. This distinction prevents hidden reflection requests without changing the public value boundary.
+Errors cross as copied error information and are reconstructed in the receiving context. Worker
+logs and fatal errors are projected into the browser.
 
-The compiler combines static member reads through a small ownership-aware reader in `access.ts`. Its weak registry lets separately bundled copies find the same proxy reader, including after reconnect when old references must still throw. Local values need no connection. The `lumiana/internal` entry has no dependency on the connection or serialization runtime, and its imports preserve ESM or CommonJS syntax. Globals and synchronous module resolution can carry their read path in the initial invocation. Dynamic keys, optional chains, method receivers, assignment targets, and `super` retain the JavaScript evaluation steps that cannot safely be combined.
+## Native addons
 
-Plain records are snapshots, not shared memory. Exotic objects such as `arguments` are references even when their prototype resembles a plain object. Copying `arguments` as a record would drop its non-enumerable `length` and silently discard arguments in native callback adapters. Prototype classification also precedes tag access to avoid reentering an inherited remote getter while serializing its receiver.
+Lumiana detects `.node` imports during bundling. The JavaScript package around the addon remains in
+the browser. The production manifest contains only the package that owns the native binary, so the
+Worker can load that binary.
 
-Module placement probes resolve the browser entry without loading it through Rollup's CommonJS transformer. Built-ins are external to that probe but do not make their importing package external. Native addon loading, dynamic native resolution, module-relative native globals, and failed browser bundling provide exclusion evidence. A local exported implementation whose binding graph transitively reaches a native capability can execute as a native segment; direct re-exports of built-ins keep the normal bundled-reference path because moving their package adds no locality. This lets a Node adapter such as `@hono/node-server` run beside `node:http` while Hono's router and application callbacks stay in the browser. The analysis follows syntax and lexical bindings rather than package names. Export inspection uses syntax and module lexers, never execution of third-party packages. The deployment manifest records native packages and the package owners needed for their relative resolution.
+CommonJS addon loaders often receive only a binary basename and discover its installed path from
+`__filename`. That discovery cannot run after bundling because the browser bundle is no longer in
+the package's filesystem directory. When a loader call has a static `.node` request, Lumiana finds
+the matching installed binary at build time, records its owning package, and replaces the locator
+call with the same native-addon capability used by direct `.node` imports. This decision follows
+the source shape and filesystem evidence; it does not depend on the loader's or consumer's package
+name.
 
-The test suite covers independent reflection, callback, stream, binary, networking, bundling, framing, isolation, and lifetime contracts. Browser fixtures exercise the real synchronous XHR path. A passing fixture demonstrates its tested behavior; it is not proof that every possible native engine brand check or arbitrary third-party package is transparent across processes.
+Some loaders compute the final binary path before passing it to a dynamic CommonJS `require`.
+When the containing module has an installed `.node` target that can be established at build time,
+Lumiana retains that local path computation and routes the resulting `.node` load through the
+native-addon capability. Discovery prefers the requested basename; packages that compute a
+platform-specific basename use the single installed binary matching the build platform and
+architecture. An ambiguous set fails the build. Dynamic JavaScript-module loading remains outside
+that capability.
+
+The binary's entry points become local browser functions backed by native operation handles.
+Returned data records copy normally. Returned native instances become local objects whose private
+handles identify native resources. Constructors, prototypes, method receivers, repeated values,
+and `instanceof` stay coherent in the browser. Browser callbacks remain browser functions; the
+native operation receives a callback capability and Lumiana returns callback values across the
+same connection.
+
+This adapter is specific to the native-addon boundary. It is not a mechanism for moving ordinary
+JavaScript modules or arbitrary objects into the Worker.
+
+## Module selection
+
+Importing a Node builtin through either `fs` or `node:fs` does not make a dependency server-owned.
+Both specifier forms establish the same Node execution provenance. Lumiana resolves that builtin to
+a browser runtime contract and continues bundling the dependency.
+
+Some packages publish different browser and Node conditional exports. If the browser export lacks
+an export used by the source while the Node export provides it, Lumiana bundles the Node export and
+rewrites its builtin imports to local runtime contracts. Dependency source that explicitly consumes
+Node behavior also resolves its own conditional dependencies with Node conditions. Application
+composition modules retain normal browser conditions for unrelated imports.
+
+The analysis follows import syntax, required exports, transitive `export *` edges, lexical bindings,
+and package metadata through the active Vite resolver. It does not use package-name lists. A missing
+builtin contract fails the build with the missing domain instead of moving the package into the
+Worker.
+
+Ambient names do not establish a Node contract for a dependency. Libraries routinely probe names
+such as `process` and `setImmediate` to select browser behavior, and Vite owns its
+`process.env.NODE_ENV` replacement. Lumiana supplies implicit Node globals to application modules
+and to dependency modules with explicit Node provenance: a Node builtin import, a Node conditional
+export selected by the resolver, or module-relative Node metadata. This keeps browser feature
+detection intact without package-specific exceptions.
+
+Node provenance follows the resolved dependency edges of a selected Node runtime contract. This
+includes relative implementation files and helper packages used by a builtin adapter. The rule is
+graph ownership: browser graphs retain browser globals, while every module executing inside a local
+Node contract receives that contract consistently.
+
+CommonJS `__filename` and `__dirname` describe module identity rather than an operating-system
+operation. Lumiana records each module's path relative to the build root and resolves it locally
+against the connection's module root. This root is distinct from `process.cwd()`. The values
+therefore require no boundary request and remain valid when a production bundle is moved or started
+from another working directory.
+
+## Transport and lifetime
+
+Asynchronous commands, results, callbacks, and resource events share one binary WebSocket. A
+synchronous Node API makes one synchronous HTTP request for its operating-system decision. Large
+synchronous replies use gzip around the required text envelope.
+
+Native addons may invoke a browser callback before a synchronous native call returns. In that
+case, the synchronous response carries the callback request, the browser executes its local
+function, and a continuation returns the copied result. The Worker waits on its message port so the
+native stack remains intact. Asynchronous addon callbacks use the WebSocket.
+
+Each authenticated connection owns one Worker and its resource handles. Closing the browser side,
+the Worker, or the host invalidates the whole connection. Handles from a closed connection cannot
+be reused by a later connection.
+
+## Known incomplete domains
+
+The architecture deliberately reports an unsupported local contract where behavior is not yet
+implemented. Current incomplete areas include HTTP clients, TLS, HTTP/2, DNS, UDP, worker threads,
+async context, complete VM isolation, advanced filesystem descriptors and streams, and some
+process and child-process behavior. These are runtime-domain gaps, not reasons to externalize a
+consumer package.
