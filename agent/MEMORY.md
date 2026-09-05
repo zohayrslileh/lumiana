@@ -46,9 +46,11 @@ work here. Verify details against source and never store credentials or secrets.
   event emitters, callbacks, and binary buffers. The Worker owns opaque operating
   system handles. Kernel commands/events use the existing binary MessagePack
   WebSocket and close with their connection.
-- Runtime contracts currently exist for `node:fs/promises`, `node:net`, and the
-  HTTP server half of `node:http`. Filesystem handles, TCP/Unix sockets, and HTTP
-  listeners live in the Worker; all surrounding JavaScript behavior is local.
+- Runtime contracts currently exist for callback, Promise, synchronous, stream,
+  and watcher forms of `node:fs`; `node:net`; `node:child_process`; and the HTTP
+  server half of `node:http`. Filesystem handles, watchers, child processes,
+  TCP/Unix sockets, and HTTP listeners live in the Worker; all surrounding
+  JavaScript behavior is local.
 - Pure/local builtins currently include assert, buffer, crypto, events, module,
   path, process state, querystring, stream, stream/promises, string_decoder,
   timers, url, util, and zlib. Crypto fills arbitrary-sized binary views by
@@ -63,6 +65,16 @@ work here. Verify details against source and never store credentials or secrets.
   module's origin. Supported CommonJS builtins return local constructors. Static
   missing optional dependencies are proven at build time and throw local
   `MODULE_NOT_FOUND`, allowing a package's own JavaScript fallback without a call.
+- `node:url` is a local runtime facade for WHATWG and legacy URL behavior. The
+  compiler gives binding-proven `fileURLToPath(import.meta.url)` calls the native
+  source file URL; unrelated browser `import.meta.url` expressions keep their
+  browser meaning. This module identity must come from the build because hashed
+  production asset URLs cannot recover an original source path.
+- `node:util` owns a local, process-wide `util.promisify.custom` contract using
+  `Symbol.for('nodejs.util.promisify.custom')`. `child_process.exec` and
+  `execFile` use it to return `{ stdout, stderr }` Promises with an immediate
+  `.child` handle, matching Node while all child lifecycle traffic stays on the
+  established WebSocket.
 - Dependency modules that explicitly consume the Node execution contract resolve
   their dependencies with Node export conditions. Application composition roots
   retain browser conditions for unrelated imports. This selects Node adapters
@@ -93,22 +105,23 @@ work here. Verify details against source and never store credentials or secrets.
   runtime contracts removed the first groups. Build-time module availability
   removed `bufferutil` and `utf-8-validate` calls by preserving CrossWS's own
   fallback semantics.
-- The canonical suite passes 21 tests, including CommonJS format preservation,
+- The canonical suite passes 24 tests, including CommonJS format preservation,
   1 MiB local random fill, binary
-  gzip round trips, and local failure of statically absent optional dependencies.
-  Type checking and the production example build pass.
+  gzip round trips, local URL conversion, source-module identity, and local failure
+  of statically absent optional dependencies. Type checking and the production
+  example build pass.
 - CommonJS sources must never receive injected ESM imports or browser runtime
   `require()` calls. Connection-dependent helpers are read from the internal
   `Symbol.for('lumiana.runtime')` browser-context registry initialized by the
   client. The reference-reader primitive bootstraps independently through
   `Symbol.for('lumiana.readPath')` and its shared WeakMap, avoiding a cycle when
   the client itself loads CommonJS dependencies such as `buffer`.
-- The real `@phreshos/node` 0.1.15 example now builds and runs in both Vite 8 dev
-  and preview. `System.connect()` succeeds and `system.program.list()` returns an
-  array. Its current startup makes 28 synchronous native calls, mainly synchronous
-  filesystem, OS, child-process, and Jiti VM/module operations; these belong to
-  runtime domains still awaiting local object models and transaction support.
-- A packet-level trace accounts for all 28 PhreshOS calls: 10 static native binding
+- The real `@phreshos/node` 0.1.15 example builds and runs in Vite 8. After local
+  builtin module acquisition, OS snapshots, and the full `node:fs` facade, its
+  startup makes 2 synchronous calls instead of 28. They are exactly the actual
+  `existsSync()` and `realpathSync()` filesystem decisions. Its Unix-socket
+  connection and `program.list()` remain on WebSocket.
+- A packet-level trace accounted for the original 28 PhreshOS calls: 10 static native binding
   loads (`fs`, `os`, and `child_process`), 7 whole-module loads from AdmZip/Jiti
   (`fs`, `os`, `v8`, `tty`, `perf_hooks`, and `vm`), 7 Jiti compatibility/reflection
   operations, and 4 actual startup calls (two `homedir()`, `existsSync()`, and
@@ -118,13 +131,27 @@ work here. Verify details against source and never store credentials or secrets.
   binding acquisition is itself a side effect, so the bundler cannot discard those
   otherwise unused paths. Local builtin module objects should remove the 24 setup
   calls; local OS snapshots remove `homedir`, leaving the genuinely synchronous
-  filesystem decisions for the general transaction/async-lifting design.
+  filesystem decisions for the general transaction/async-lifting design. This
+  prediction is now verified by the real production bundle.
+- Kernel operation arrays have their own copy contract in `kernel-transfer.ts`.
+  Ordinary application arrays remain references, while arrays that constitute
+  kernel arguments or results reconstruct locally. This removed hidden reflection
+  calls discovered by the child-process and filesystem callback tests.
+- Child-process spawn, binary stdout/stderr, lifecycle events, stdin, IPC commands,
+  kill, and ref state use WebSocket with a browser-owned `ChildProcess` and local
+  streams. Only `spawnSync`/`execSync`/`execFileSync` use the synchronous path.
+- Stable `node:os` identity is a connection snapshot. Live values (`freemem`,
+  `loadavg`, and process priority) retain one synchronous host query. `node:tty`,
+  `node:perf_hooks`, `node:v8`, and `node:vm` now have local import-time facades;
+  separate VM-context semantics remain incomplete.
 
 ## Remaining runtime domains
 
-- Callback and synchronous `node:fs`, file streams, watchers, and complete metadata.
+- Complete file-descriptor mutation semantics, incremental file streams, directory
+  handles, recursive watcher parity, and complete filesystem metadata.
 - HTTP clients, upgrades, full backpressure, TLS and HTTP/2 local object models.
-- DNS, UDP, child processes, worker threads, async context, and process lifecycle.
+- DNS, UDP, worker threads, async context, and process lifecycle. Child-process
+  advanced stdio, IPC handle transfer, and exact exec error metadata remain.
 - Native-addon adapters and broader compatibility fixtures for server, filesystem,
   socket, and native-environment packages.
 - A general asynchronous transaction/compiler model for synchronous-looking source

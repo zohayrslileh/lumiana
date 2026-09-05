@@ -27,3 +27,24 @@ declare module 'browserify-zlib' {
   const zlib: typeof import('node:zlib');
   export = zlib;
 }
+
+declare module 'url/url.js' {
+  const url: {
+    Url: typeof import('node:url').Url;
+    parse: typeof import('node:url').parse;
+    resolve: typeof import('node:url').resolve;
+    resolveObject: typeof import('node:url').resolveObject;
+    format: typeof import('node:url').format;
+  };
+  export default url;
+}
+
+declare module 'punycode/punycode.js' {
+  const punycode: { decode(value: string): string };
+  export default punycode;
+}
+
+declare module 'util/util.js' {
+  const util: typeof import('node:util') & Record<string, any>;
+  export default util;
+}

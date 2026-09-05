@@ -4,6 +4,7 @@ export interface ProcessSnapshot {
   env: Record<string, string>;
   argv: string[];
   execArgv: string[];
+  execPath: string;
   platform: string;
   arch: string;
   version: string;
@@ -41,7 +42,16 @@ export function initializeProcess(snapshot: ProcessSnapshot): void {
   for (const key of Object.keys(env)) delete env[key];
   Object.assign(env, snapshot.env);
   state.directory = snapshot.cwd;
-  for (const key of ['argv', 'execArgv', 'platform', 'arch', 'version', 'versions', 'pid'] as const)
+  for (const key of [
+    'argv',
+    'execArgv',
+    'execPath',
+    'platform',
+    'arch',
+    'version',
+    'versions',
+    'pid',
+  ] as const)
     Object.defineProperty(runtime, key, {
       configurable: true,
       enumerable: true,

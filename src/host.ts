@@ -5,6 +5,8 @@ import path from 'node:path';
 import fs from 'node:fs/promises';
 import { createReadStream } from 'node:fs';
 import { gzipSync } from 'node:zlib';
+import os from 'node:os';
+import { constants as performanceConstants } from 'node:perf_hooks';
 import { WebSocketServer, WebSocket } from 'ws';
 import type { Duplex } from 'node:stream';
 import type { Http2SecureServer } from 'node:http2';
@@ -51,12 +53,34 @@ export function attachHost(server: Server | Http2SecureServer, options: HostOpti
     env: { ...process.env },
     argv: [...process.argv],
     execArgv: [...process.execArgv],
+    execPath: process.execPath,
     platform: process.platform,
     arch: process.arch,
     version: process.version,
     versions: { ...process.versions },
     pid: process.pid,
     cwd: process.cwd(),
+  });
+  const osSnapshot = () => ({
+    arch: os.arch(),
+    availableParallelism: os.availableParallelism(),
+    constants: os.constants,
+    cpus: os.cpus(),
+    devNull: os.devNull,
+    endianness: os.endianness(),
+    EOL: os.EOL,
+    homedir: os.homedir(),
+    hostname: os.hostname(),
+    machine: os.machine(),
+    networkInterfaces: os.networkInterfaces(),
+    platform: os.platform(),
+    release: os.release(),
+    tmpdir: os.tmpdir(),
+    totalmem: os.totalmem(),
+    type: os.type(),
+    uptime: os.uptime(),
+    userInfo: os.userInfo(),
+    version: os.version(),
   });
   function respond(res: ServerResponse, packet: any, sync = false): void {
     if (res.destroyed || res.writableEnded) return;
@@ -214,7 +238,13 @@ export function attachHost(server: Server | Http2SecureServer, options: HostOpti
           void session.stop();
           return;
         }
-        respond(res, { id, status: status(), process: processSnapshot() });
+        respond(res, {
+          id,
+          status: status(),
+          process: processSnapshot(),
+          os: osSnapshot(),
+          performance: { constants: performanceConstants },
+        });
       } else {
         const session = sessions.get(String(req.headers['x-lumiana-session']));
         if (!session || session.socket?.readyState !== WebSocket.OPEN) {

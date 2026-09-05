@@ -8,19 +8,24 @@ import { failure, restoreException, type Invocation, type Graph } from './protoc
 import { FileKernel } from './kernel/files.js';
 import { NetworkKernel } from './kernel/network.js';
 import { HttpKernel } from './kernel/http.js';
+import { SystemKernel } from './kernel/system.js';
+import { ChildProcessKernel } from './kernel/child-process.js';
+import { packKernel, unpackKernel } from './kernel-transfer.js';
 if (!parentPort) throw new Error('Lumiana requires a worker thread');
 const port = parentPort;
 const signal = new Int32Array(workerData.signal);
 const parentURL = pathToFileURL(path.join(workerData.root, 'package.json')).href;
 const require = createRequire(parentURL);
 const modules = new Map<string, any>();
-const files = new FileKernel();
 let kernelSequence = 0;
 const allocateKernelHandle = () => ++kernelSequence;
 const kernelEvent = (handle: number, event: string, ...args: any[]) =>
     send({ type: 'kernel-event', handle, event, args }),
+  files = new FileKernel(kernelEvent, allocateKernelHandle),
   network = new NetworkKernel(kernelEvent, allocateKernelHandle),
   http = new HttpKernel(kernelEvent, allocateKernelHandle);
+const system = new SystemKernel();
+const children = new ChildProcessKernel(kernelEvent, allocateKernelHandle);
 let sequence = 0,
   pumping = 0;
 let context: number | undefined;
@@ -86,6 +91,22 @@ const refs = new References({
         }),
       );
     }
+    if (operation === 'moduleCall' || operation === 'moduleConstruct') {
+      const [specifier, origin, packedPath, packedArgs] = args;
+      const memberPath = unpackKernel(packedPath);
+      const callArgs = unpackKernel(packedArgs);
+      let receiver = requireModule(specifier, origin);
+      let fn = receiver;
+      for (const key of memberPath) {
+        receiver = fn;
+        fn = Reflect.get(receiver, key, receiver);
+      }
+      if (typeof fn !== 'function')
+        throw new TypeError(`${specifier}.${memberPath.join('.')} is not a function`);
+      return operation === 'moduleCall'
+        ? Reflect.apply(fn, receiver, callArgs)
+        : Reflect.construct(fn, callArgs);
+    }
     if (operation === 'evaluate')
       return evaluateExpression(args[0], (name) => (globalThis as any)[name]);
     throw new TypeError(`Unknown operation ${operation}`);
@@ -96,7 +117,9 @@ const exception = (error: unknown) =>
 function handle(message: any): void {
   if (message.type === 'close') {
     refs.close();
-    void Promise.all([files.close(), network.close(), http.close()]).finally(() => process.exit(0));
+    void Promise.all([files.close(), network.close(), http.close(), children.close()]).finally(() =>
+      process.exit(0),
+    );
     return;
   }
   if (message.type === 'turn-end') {
@@ -134,16 +157,42 @@ function handle(message: any): void {
     }
   };
   if (message.invocation.operation === 'kernel') {
-    const [operation, ...args] = message.invocation.args.map((arg: Graph) => refs.decode(arg));
+    const [operation, ...packed] = message.invocation.args.map((arg: Graph) => refs.decode(arg));
+    const args = packed.map((value: any) => unpackKernel(value));
     const kernel = operation.startsWith('fs.')
       ? files
       : operation.startsWith('net.')
         ? network
-        : http;
+        : operation.startsWith('child.')
+          ? children
+          : http;
     void kernel.execute(operation, args).then(
-      (value) => finish(true, refs.encode(value)),
+      (value) => finish(true, refs.encode(packKernel(value))),
       (error) => finish(false, error),
     );
+    return;
+  }
+  if (message.invocation.operation === 'kernelSync') {
+    const [operation, ...packed] = message.invocation.args.map((arg: Graph) => refs.decode(arg));
+    const args = packed.map((value: any) => unpackKernel(value));
+    try {
+      const value = operation.startsWith('fs.')
+        ? files.executeSync(operation, args)
+        : operation.startsWith('os.')
+          ? system.executeSync(operation, args)
+          : operation.startsWith('child.')
+            ? system.executeSync(operation, args)
+            : undefined;
+      if (
+        !operation.startsWith('fs.') &&
+        !operation.startsWith('os.') &&
+        !operation.startsWith('child.')
+      )
+        throw new TypeError(`Unknown synchronous operation ${operation}`);
+      finish(true, refs.encode(packKernel(value)));
+    } catch (error) {
+      finish(false, error);
+    }
     return;
   }
   if (message.invocation.operation === 'module') {

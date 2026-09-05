@@ -147,6 +147,39 @@ test('createRequire records unavailable static dependencies at build time', asyn
     /makeRequire\(import\.meta\.url,"node_modules\/package\/index\.js",\["optional-native"\]\)/,
   );
 });
+test('Node file URL conversion receives the native source module location', async () => {
+  const sourceURL = 'file:///workspace/src/entry.ts';
+  const transformed = await transformSource(
+    `import {fileURLToPath as toPath} from 'node:url';
+import * as url from 'node:url';
+import urlDefault from 'node:url';
+const direct=toPath(import.meta.url);
+const relative=url.fileURLToPath(new URL('../data', import.meta.url));
+const defaultImport=urlDefault.fileURLToPath(import.meta.url);
+const browserURL=import.meta.url;
+function untouched(fileURLToPath){return fileURLToPath(import.meta.url)}`,
+    '/workspace/src/entry.ts',
+    {
+      sourceURL,
+      place: async () => ({ native: false }),
+    },
+  );
+  assert.ok(transformed);
+  assert.match(transformed.code, /toPath\("file:\/\/\/workspace\/src\/entry\.ts"\)/);
+  assert.match(
+    transformed.code,
+    /url\.fileURLToPath\(new URL\('\.\.\/data', "file:\/\/\/workspace\/src\/entry\.ts"\)\)/,
+  );
+  assert.match(transformed.code, /const browserURL=import\.meta\.url/);
+  assert.match(
+    transformed.code,
+    /urlDefault\.fileURLToPath\("file:\/\/\/workspace\/src\/entry\.ts"\)/,
+  );
+  assert.match(
+    transformed.code,
+    /function untouched\(fileURLToPath\)\{return fileURLToPath\(import\.meta\.url\)\}/,
+  );
+});
 test('bundling is the default; Node built-ins are not grounds for excluding a package', async () => {
   const temp = await fs.mkdtemp(path.join(os.tmpdir(), 'lumiana-placement-'));
   try {

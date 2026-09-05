@@ -154,8 +154,12 @@ test('client contract through real HTTP, binary WebSocket and an isolated native
     invokeMember,
   } = await import('../dist/client.js');
   const browserFs = await import('../dist/runtime/fs-promises.js');
+  const browserNodeFs = await import('../dist/runtime/fs.js');
   const browserHttp = await import('../dist/runtime/http.js');
   const browserNet = await import('../dist/runtime/net.js');
+  const browserOS = await import('../dist/runtime/os.js');
+  const browserChildProcess = await import('../dist/runtime/child-process.js');
+  const browserUtil = await import('../dist/runtime/util.js');
   const creds = { username: 'test', password: 'secret', url };
   const compile = async (source: string, origin = 'reader.js') => {
     const result = await transformSource(source, origin, {
@@ -185,6 +189,10 @@ test('client contract through real HTTP, binary WebSocket and an isolated native
     assert.equal(await connect.credentials(creds), lumiana);
     await assert.rejects(connect.credentials({ ...creds, password: 'different' }), /different/);
     assert.equal((await lumiana.status()).pid, pid);
+    const beforeOS = XMLHttpRequest.requests;
+    assert.equal(browserOS.homedir(), os.homedir());
+    assert.equal(browserOS.platform(), os.platform());
+    assert.equal(XMLHttpRequest.requests, beforeOS, 'stable OS state is connection-local');
     const kernelDirectory = await fs.mkdtemp(path.join(os.tmpdir(), 'lumiana-browser-fs-'));
     const kernelFile = path.join(kernelDirectory, 'message.bin');
     try {
@@ -201,9 +209,69 @@ test('client contract through real HTTP, binary WebSocket and an isolated native
         beforeKernel,
         'filesystem kernel operations use the established WebSocket',
       );
+      const beforeSync = XMLHttpRequest.requests;
+      assert.equal(browserNodeFs.existsSync(kernelFile), true);
+      assert.equal(
+        XMLHttpRequest.requests - beforeSync,
+        1,
+        'a synchronous OS decision is one call',
+      );
+      const syncStat = browserNodeFs.statSync(kernelFile);
+      assert.equal(syncStat.isFile(), true);
+      assert.equal(
+        XMLHttpRequest.requests - beforeSync,
+        2,
+        'synchronous results retain local behavior without reflection calls',
+      );
+      const beforeCallback = XMLHttpRequest.requests;
+      const callbackValue = await new Promise<Buffer>((resolve, reject) =>
+        browserNodeFs.readFile(kernelFile, (error: Error | null, value: Buffer) =>
+          error ? reject(error) : resolve(value),
+        ),
+      );
+      assert.deepEqual(callbackValue, Buffer.from([0, 128, 255]));
+      assert.equal(
+        XMLHttpRequest.requests,
+        beforeCallback,
+        'callback filesystem operations use the established WebSocket',
+      );
+      const beforeWatch = XMLHttpRequest.requests;
+      const watcher = browserNodeFs.watch(kernelDirectory);
+      const changed = once(watcher, 'change');
+      await browserFs.writeFile(path.join(kernelDirectory, 'watched.txt'), 'changed');
+      const [eventType, filename] = await changed;
+      assert.equal(typeof eventType, 'string');
+      assert.equal(String(filename), 'watched.txt');
+      watcher.close();
+      assert.equal(
+        XMLHttpRequest.requests,
+        beforeWatch,
+        'filesystem watchers and events use the established WebSocket',
+      );
     } finally {
       await browserFs.rm(kernelDirectory, { recursive: true, force: true });
     }
+    const beforeChild = XMLHttpRequest.requests;
+    const childOutput: Buffer[] = [];
+    const spawned = browserChildProcess.spawn(process.execPath, [
+      '-e',
+      'process.stdout.write(Buffer.from([0,128,255]))',
+    ]);
+    spawned.stdout.on('data', (chunk: Buffer) => childOutput.push(chunk));
+    await once(spawned, 'close');
+    assert.deepEqual(Buffer.concat(childOutput), Buffer.from([0, 128, 255]));
+    const execFileAsync = browserUtil.promisify(browserChildProcess.execFile) as any;
+    const execution = execFileAsync(process.execPath, [
+      '-e',
+      "process.stdout.write('promisified');process.stderr.write('stderr')",
+    ]);
+    assert.equal(execution.child.constructor, browserChildProcess.ChildProcess);
+    assert.deepEqual(await execution, { stdout: 'promisified', stderr: 'stderr' });
+    assert.equal(
+      XMLHttpRequest.requests,
+      beforeChild,
+      'child process lifecycle and binary streams use the established WebSocket',
+    );
     const beforeNetworkKernel = XMLHttpRequest.requests;
     const kernelServer = browserNet.createServer((socket: any) =>
       socket.on('data', (data: Buffer) => socket.write(data)),
@@ -494,6 +562,7 @@ test('client contract through real HTTP, binary WebSocket and an isolated native
     const pending = Promise.resolve(runtime.forever());
     await new Promise((resolve) => setTimeout(resolve, 10));
     lumiana.disconnect();
+    assert.throws(() => browserOS.homedir(), /not connected/);
     await assert.rejects(pending, /disconnected/);
     assert.throws(() => counter.value, /disconnected/);
     assert.equal(await connect.credentials(creds), lumiana);

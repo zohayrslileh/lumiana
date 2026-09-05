@@ -3,6 +3,8 @@ import { References } from './references.js';
 import { evaluateExpression } from './references.js';
 import { dispatchKernel, installKernel, removeKernel } from './runtime/bridge.js';
 import processRuntime, { initializeProcess } from './runtime/process.js';
+import { clearOS, initializeOS } from './runtime/os.js';
+import { initializePerformance } from './runtime/perf-hooks.js';
 import {
   clearImmediate as localClearImmediate,
   setImmediate as localSetImmediate,
@@ -156,6 +158,7 @@ function send(c: Connection, packet: any): void {
 }
 function close(c: Connection, error = new Error('Lumiana is disconnected')): void {
   if (state.connection === c) state.connection = undefined;
+  clearOS();
   removeKernel(c);
   c.refs.close();
   for (const promise of c.pending.values()) promise.reject(error);
@@ -282,9 +285,16 @@ export const connect = {
             if (packet.type === 'ready') {
               state.connection = c;
               initializeProcess(initial.process);
+              initializeOS(initial.os);
+              initializePerformance(initial.performance);
               installKernel(
                 c,
                 (operation, ...args) => c.refs.invokeAsync('kernel', operation, ...args),
+                (operation, ...args) => c.refs.invoke('kernelSync', operation, ...args),
+                (specifier, path, args, origin) =>
+                  c.refs.invoke('moduleCall', specifier, origin, path, args),
+                (specifier, path, args, origin) =>
+                  c.refs.invoke('moduleConstruct', specifier, origin, path, args),
                 (specifier, origin, path = []) =>
                   c.refs.invokePath('module', [specifier, undefined, origin], path),
               );

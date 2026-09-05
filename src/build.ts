@@ -257,6 +257,8 @@ export interface TransformOptions {
   timers?: string;
   nativeUsage?(id?: string): void;
   origin?: string;
+  /** Native file URL for the source module represented by this transform. */
+  sourceURL?: string;
   nativeOrigin?(specifier: string): void;
   names?(id: string): Promise<string[]>;
 }
@@ -393,19 +395,38 @@ export async function transformSource(source: string, id: string, options: Trans
     calls: any[] = [],
     variables: any[] = [];
   const contextualRequire = new Set<any>();
+  const fileURLToPathBindings = new Set<any>();
+  const urlModuleBindings = new Set<any>();
   const contextualCalls: any[] = [];
+  let moduleLocationChanged = false;
   let counter = 0;
   const reserved = new Set<string>();
   traverse(ast as any, {
     ImportDeclaration(p: any) {
-      if (p.node.source.value.replace(/^node:/, '') !== 'module') return;
+      const module = p.node.source.value.replace(/^node:/, '');
       for (const specifier of p.node.specifiers) {
         if (
+          module === 'module' &&
           specifier.type === 'ImportSpecifier' &&
           (specifier.imported.name ?? specifier.imported.value) === 'createRequire'
         ) {
           const binding = p.scope.getBinding(specifier.local.name);
           if (binding) contextualRequire.add(binding);
+        }
+        if (
+          module === 'url' &&
+          specifier.type === 'ImportSpecifier' &&
+          (specifier.imported.name ?? specifier.imported.value) === 'fileURLToPath'
+        ) {
+          const binding = p.scope.getBinding(specifier.local.name);
+          if (binding) fileURLToPathBindings.add(binding);
+        }
+        if (
+          module === 'url' &&
+          ['ImportNamespaceSpecifier', 'ImportDefaultSpecifier'].includes(specifier.type)
+        ) {
+          const binding = p.scope.getBinding(specifier.local.name);
+          if (binding) urlModuleBindings.add(binding);
         }
       }
     },
@@ -437,6 +458,43 @@ export async function transformSource(source: string, id: string, options: Trans
   const esm = ast.program.body.some(
     (node) => node.type.startsWith('Import') || node.type.startsWith('Export'),
   );
+  const importMetaURL = (node: any) =>
+    node?.type === 'MemberExpression' &&
+    !node.computed &&
+    node.property?.type === 'Identifier' &&
+    node.property.name === 'url' &&
+    node.object?.type === 'MetaProperty' &&
+    node.object.meta?.name === 'import' &&
+    node.object.property?.name === 'meta';
+  const replaceModuleLocations = (node: any) => {
+    if (!node || typeof node !== 'object') return;
+    if (importMetaURL(node)) {
+      edits.overwrite(node.start, node.end, JSON.stringify(options.sourceURL));
+      moduleLocationChanged = true;
+      return;
+    }
+    for (const value of Object.values(node)) {
+      if (Array.isArray(value)) value.forEach(replaceModuleLocations);
+      else if (value && typeof value === 'object' && (value as any).type)
+        replaceModuleLocations(value);
+    }
+  };
+  if (options.sourceURL) {
+    traverse(ast as any, {
+      CallExpression(p: any) {
+        const callee = unwrapExpression(p.node.callee);
+        const direct =
+          callee.type === 'Identifier' &&
+          fileURLToPathBindings.has(p.scope.getBinding(callee.name));
+        const namespace =
+          callee.type === 'MemberExpression' &&
+          staticKey(callee) === 'fileURLToPath' &&
+          callee.object.type === 'Identifier' &&
+          urlModuleBindings.has(p.scope.getBinding(callee.object.name));
+        if (direct || namespace) replaceModuleLocations(p.node.arguments[0]);
+      },
+    });
+  }
   if (options.origin) {
     traverse(ast as any, {
       CallExpression(p: any) {
@@ -788,7 +846,7 @@ export async function transformSource(source: string, id: string, options: Trans
       `${readName}(${edits.slice(root.node.start, root.node.end)},${keys.map((key) => JSON.stringify(key)).join(',')})`,
     );
   }
-  if (!used.size && !usesProcess && !usesTimers) return null;
+  if (!used.size && !usesProcess && !usesTimers && !moduleLocationChanged) return null;
   const names: Record<string, string> = {
     nativeModule: nodeName,
     nativeBindings: bindingsName,

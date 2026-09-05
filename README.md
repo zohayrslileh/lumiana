@@ -49,7 +49,7 @@ import { hostname } from 'node:os';
 document.body.textContent = `Connected to ${hostname()}`;
 ```
 
-`hostname()` runs on the server and returns a string synchronously. The DOM update runs in the browser.
+The connection snapshots stable operating-system identity, so `hostname()` and the DOM update both run locally. Live or mutating operating-system queries still cross once because their Node API is synchronous.
 
 The bootstrap uses the instance returned by `connect.credentials()`. Inside the hybrid application, modules can import `{ lumiana }` from `'lumiana/client'` to access that same instance.
 
@@ -94,7 +94,11 @@ Primitives and plain records cross by value, including cyclic records. Functions
 
 Lumiana's runtime is divided by capability. Ordinary JavaScript values, module objects, constructors, streams, events, callbacks, timers, hashing, compression, and process snapshots stay in the browser. The Worker owns only resources that require its operating system, such as file handles and listening sockets. Local objects send compact kernel commands over the binary MessagePack WebSocket when they need those resources; events return over the same connection. This preserves local identity and avoids reflection traffic through remote proxies.
 
-The current browser-owned runtime includes `node:fs/promises`, `node:net`, the server half of `node:http`, `node:crypto`, `node:zlib`, `node:stream/promises`, `node:module`, `node:timers`, and the portable core modules. `process.env` is initialized once during connection as a normal null-prototype object, so property access and `JSON.stringify(process.env)` are local. `createRequire()` is source-relative and local for supported builtins. When a static optional dependency is absent, the build records that fact and `require()` throws `MODULE_NOT_FOUND` locally, preserving the library's own fallback path without contacting the server.
+The current browser-owned runtime includes callback, Promise, synchronous, stream, and watcher forms of `node:fs`; `node:net`; the server half of `node:http`; `node:child_process`; `node:os`; `node:crypto`; `node:zlib`; `node:stream/promises`; `node:module`; `node:timers`; and the portable core modules. Child processes, file watchers, TCP connections, and Unix sockets expose local event emitters and streams while their operating-system handles remain in the Worker. Their asynchronous commands and events use WebSocket. Synchronous filesystem and child-process calls use one synchronous request per operation.
+
+`process.env` and stable OS information are initialized during connection as ordinary local values, so property access, `JSON.stringify(process.env)`, `homedir()`, and `platform()` make no requests. Runtime facades for `node:tty`, `node:perf_hooks`, `node:v8`, and `node:vm` also keep module acquisition local; operations that require Node remain native. The browser implementation of `vm.runInThisContext()` evaluates in the browser global realm. Separate Node VM context semantics do not exist in that realm and remain an incomplete runtime domain.
+
+`createRequire()` is source-relative and local for supported builtins. When a static optional dependency is absent, the build records that fact and `require()` throws `MODULE_NOT_FOUND` locally, preserving the library's own fallback path without contacting the server.
 
 Unsupported native modules still use references owned by the Worker. A synchronous operation on such a reference uses synchronous XHR with a MessagePack request and a compressed Base64 MessagePack response; asynchronous reference and kernel traffic uses binary MessagePack over WebSocket. This path preserves behavior while additional runtime domains move local. Lumiana does not cache mutable reflection or invent package-specific shortcuts to hide its cost.
 

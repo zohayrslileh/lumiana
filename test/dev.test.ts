@@ -2,6 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs/promises';
 import path from 'node:path';
+import { pathToFileURL } from 'node:url';
 import { createServer } from 'vite';
 import { lumiana } from '../dist/index.js';
 
@@ -18,7 +19,7 @@ test(
       );
       await fs.writeFile(
         path.join(root, 'main.js'),
-        'export const read = value => value.nested.value; export const env = () => JSON.stringify(process.env);',
+        "import {fileURLToPath} from 'node:url'; export const filename=fileURLToPath(import.meta.url); export const read = value => value.nested.value; export const env = () => JSON.stringify(process.env);",
       );
       for (const allow of [undefined, [root]]) {
         const server = await createServer({
@@ -53,6 +54,10 @@ test(
           const mainCode = await main.text();
           assert.match(mainCode, /readPath/);
           assert.match(mainCode, /runtime\/process\.js/);
+          assert.match(mainCode, /runtime\/url\.js/);
+          assert.ok(
+            mainCode.includes(JSON.stringify(pathToFileURL(path.join(root, 'main.js')).href)),
+          );
           for (const [, dependency] of mainCode.matchAll(/from ["'](\/\@fs\/[^"']+)["']/g)) {
             const runtimeDependency = await request(origin + dependency);
             assert.equal(runtimeDependency.status, 200, dependency);

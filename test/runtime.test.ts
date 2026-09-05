@@ -14,6 +14,8 @@ import { createHttp } from '../src/runtime/http-core.js';
 import { createRequire } from '../src/runtime/module.js';
 import crypto from '../src/runtime/crypto.js';
 import zlib from '../src/runtime/zlib.js';
+import * as runtimeURL from '../src/runtime/url.js';
+import runtimeUtil from '../src/runtime/util.js';
 
 test('createRequire keeps portable CommonJS constructors local', () => {
   const require = createRequire(import.meta.url, 'test/runtime.test.ts');
@@ -33,6 +35,34 @@ test('crypto and compression execute locally with binary Node-compatible values'
     'eddec645f3362a73ebb250129b196d57253d78f670655ab9a9472eaf814c1893',
   );
   assert.deepEqual(zlib.gunzipSync(zlib.gzipSync(bytes)), bytes);
+});
+
+test('promisify honors the process-wide Node custom implementation contract', async () => {
+  const callback = ((done: (error: null, value: string) => void) => done(null, 'generic')) as any;
+  callback[runtimeUtil.promisify.custom] = () => Promise.resolve({ first: 1, second: 2 });
+  assert.deepEqual(await runtimeUtil.promisify(callback)(), { first: 1, second: 2 });
+  assert.equal(runtimeUtil.promisify.custom, Symbol.for('nodejs.util.promisify.custom'));
+});
+
+test('URL values and path conversions execute locally with Node-compatible semantics', () => {
+  const file = '/tmp/Lumiana file#1?.txt';
+  const url = runtimeURL.pathToFileURL(file, { windows: false });
+  assert.equal(url.href, 'file:///tmp/Lumiana%20file%231%3F.txt');
+  assert.equal(runtimeURL.fileURLToPath(url, { windows: false }), file);
+  assert.equal(
+    runtimeURL.fileURLToPath('file:///C:/Lumiana/file.txt', { windows: true }),
+    'C:\\Lumiana\\file.txt',
+  );
+  assert.equal(runtimeURL.domainToASCII('español.com'), 'xn--espaol-zwa.com');
+  assert.equal(runtimeURL.domainToUnicode('xn--espaol-zwa.com'), 'español.com');
+  assert.equal(
+    runtimeURL.format(new URL('https://a:b@xn--g6w251d/path'), { unicode: true }),
+    'https://a:b@測試/path',
+  );
+  assert.throws(
+    () => runtimeURL.fileURLToPath('https://example.com/file', { windows: false }),
+    (error: any) => error.code === 'ERR_INVALID_URL_SCHEME',
+  );
 });
 
 test('createRequire rejects a statically unavailable optional dependency locally', () => {

@@ -7,8 +7,8 @@ import process from './process.js';
 import querystring from 'querystring-es3';
 import stream from 'stream-browserify';
 import stringDecoder from 'string_decoder';
-import url from 'url';
-import util from 'util';
+import url from './url.js';
+import util from './util.js';
 import http from './http.js';
 import http2 from './http2.js';
 import https from './https.js';
@@ -17,18 +17,31 @@ import streamPromises from './stream-promises.js';
 import timers from './timers.js';
 import tls from './tls.js';
 import zlib from './zlib.js';
+import childProcess from './child-process.js';
+import fs from './fs.js';
+import fsPromises from './fs-promises.js';
+import os from './os.js';
+import perfHooks from './perf-hooks.js';
+import tty from './tty.js';
+import v8 from './v8.js';
+import vm from './vm.js';
 import { nativeRequire } from './bridge.js';
 
 const local: Record<string, any> = Object.assign(Object.create(null), {
   assert,
   buffer,
+  child_process: childProcess,
   crypto,
   events: EventEmitter,
+  fs,
+  'fs/promises': fsPromises,
   http,
   http2,
   https,
   net,
+  os,
   path,
+  perf_hooks: perfHooks,
   process,
   querystring,
   stream,
@@ -38,7 +51,10 @@ const local: Record<string, any> = Object.assign(Object.create(null), {
   util,
   timers,
   tls,
+  tty,
   zlib,
+  v8,
+  vm,
 });
 
 const names = new Set([

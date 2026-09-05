@@ -14,7 +14,7 @@ type FileType =
 
 const isType = (actual: FileType, expected: FileType) => actual === expected;
 
-class Stats {
+export class Stats {
   [key: string]: any;
   constructor(record: Record<string, any>) {
     Object.assign(this, record);
@@ -44,7 +44,7 @@ class Stats {
   }
 }
 
-class Dirent {
+export class Dirent {
   name: string | Buffer;
   parentPath: string;
   path: string;
@@ -85,6 +85,11 @@ const binary = (value: any) => (value instanceof Uint8Array ? Buffer.from(value)
 const input = (value: any) => (Buffer.isBuffer(value) ? new Uint8Array(value) : value);
 const result = (value: any, options?: any) =>
   typeof options === 'string' || options?.encoding ? value : binary(value);
+
+export const fileResult = result;
+export const inputValue = input;
+export const statResult = (value: any) => new Stats(value);
+export const directoryResult = (value: any) => new Dirent(value);
 
 export function createFileSystem(call: KernelCall) {
   class FileHandle {
