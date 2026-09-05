@@ -50,7 +50,14 @@ test(
           assert.equal((await request(runtime('host.js'))).status, 403);
           const main = await request(origin + '/main.js');
           assert.equal(main.status, 200);
-          assert.match(await main.text(), /readPath/);
+          const mainCode = await main.text();
+          assert.match(mainCode, /readPath/);
+          assert.match(mainCode, /runtime\/process\.js/);
+          for (const [, dependency] of mainCode.matchAll(/from ["'](\/\@fs\/[^"']+)["']/g)) {
+            const runtimeDependency = await request(origin + dependency);
+            assert.equal(runtimeDependency.status, 200, dependency);
+            await runtimeDependency.text();
+          }
           assert.ok(server.config.server.fs.allow.includes(root));
           assert.equal(server.config.server.fs.strict, true);
         } finally {

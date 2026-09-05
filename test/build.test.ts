@@ -39,14 +39,15 @@ test('read-chain transforms preserve calls, writes, optional access and computed
   const global = await transformSource('export const home = process.env.HOME;', 'entry.js', {
     place: async () => ({ native: true }),
   });
-  assert.match(global!.code, /\("process","env","HOME"\)/);
+  assert.match(global!.code, /from "node:process"/);
+  assert.doesNotMatch(global!.code, /nativeGlobal as/);
   const intrinsic = await transformSource(
     'export const value = JSON.stringify(process.env);',
     'entry.js',
     { place: async () => ({ native: false }) },
   );
-  assert.match(intrinsic!.code, /evaluateIntrinsic as/);
-  assert.match(intrinsic!.code, /"kind":"call"/);
+  assert.match(intrinsic!.code, /from "node:process"/);
+  assert.doesNotMatch(intrinsic!.code, /evaluateIntrinsic as/);
   const module = await transformSource(
     "export const x = require('any-package').branch.value;",
     'entry.js',
@@ -71,13 +72,33 @@ test('read-chain transforms preserve calls, writes, optional access and computed
   assert.ok(cjs);
   assert.ok(cjs.code.startsWith("'use strict';"));
   assert.ok(!cjs.code.includes('import {'));
-  const access = await import('../dist/access.js');
   const exports = { exports: undefined as any };
-  new Function('require', 'module', cjs.code)(() => access, exports);
+  new Function('module', cjs.code)(exports);
   assert.deepEqual(exports.exports.call(undefined, { child: { value: 8 } }), {
     strict: true,
     value: 8,
   });
+});
+test('CommonJS transforms preserve the CommonJS module contract', async () => {
+  const transformed = await transformSource(
+    "'use strict';module.exports=(name)=>{setImmediate(()=>{});return [process.env,Buffer.from('x'),require(name)]};",
+    'runtime.cjs',
+    {
+      place: async () => ({ native: false }),
+      origin: 'node_modules/runtime/runtime.cjs',
+    },
+  );
+  assert.ok(transformed);
+  assert.ok(transformed.code.startsWith("'use strict';"));
+  assert.doesNotMatch(transformed.code, /(^|[;\n])\s*import\s/m);
+  assert.doesNotMatch(
+    transformed.code,
+    /require\("(?:node:process|node:timers|lumiana\/client)"\)/,
+  );
+  assert.match(transformed.code, /Symbol\.for\("lumiana\.runtime"\)/);
+  assert.match(transformed.code, /process:__lumiana/);
+  assert.match(transformed.code, /setImmediate:__lumiana/);
+  assert.match(transformed.code, /nativeModule:__lumiana/);
 });
 test('scope-aware transforms preserve explicit browser access and local bindings', async () => {
   const source = `import fs from 'node:fs';import {readFile} from 'node:fs/promises';const native=fs.readFileSync('x');const same=fetch('/x');const remote=fetch('https://example.com');window.fetch('/explicit');new WebSocket('/socket');function shadow(fetch,WebSocket,process){fetch();new WebSocket();return process;}const fields={fetch,process};`;
@@ -112,6 +133,20 @@ test('module placement receives the exports required by each static use', async 
     ['conditional-server', ['Receiver']],
   ]);
 });
+test('createRequire records unavailable static dependencies at build time', async () => {
+  const transformed = await transformSource(
+    "import {createRequire as makeRequire} from 'node:module';const require=makeRequire(import.meta.url);try{require(`optional-native`)}catch{};process.on('exit',()=>{});",
+    'package.js',
+    {
+      origin: 'node_modules/package/index.js',
+      place: async (id) => ({ native: false, available: id !== 'optional-native' }),
+    },
+  );
+  assert.match(
+    transformed!.code,
+    /makeRequire\(import\.meta\.url,"node_modules\/package\/index\.js",\["optional-native"\]\)/,
+  );
+});
 test('bundling is the default; Node built-ins are not grounds for excluding a package', async () => {
   const temp = await fs.mkdtemp(path.join(os.tmpdir(), 'lumiana-placement-'));
   try {
@@ -130,25 +165,19 @@ test('bundling is the default; Node built-ins are not grounds for excluding a pa
     const placement = new Bundling(temp, ['explicit']);
     const goodPlacement = await placement.placement('good', good);
     assert.equal(goodPlacement.native, false);
-    assert.deepEqual(goodPlacement.nativeExports, ['read']);
     assert.equal((await placement.placement('native', native)).native, true);
     assert.equal((await placement.placement('dynamic', dynamic)).native, false);
     assert.equal((await placement.placement('data', data)).native, false);
     assert.equal((await placement.placement('explicit', good)).native, true);
 
-    let segmented = '';
     const transformed = await transformSource(
       "import {read,add} from 'good';export const values=[read,add(1,2)];",
       'entry.js',
       {
         place: async () => goodPlacement,
-        nativeSegment: (id) => (segmented = id),
       },
     );
-    assert.equal(segmented, 'good');
-    assert.match(transformed!.code, /import \{add\} from "good"/);
-    assert.match(transformed!.code, /nativeBindings as/);
-    assert.match(transformed!.code, /\("good",undefined,\{"0":"read"\}\)/);
+    assert.equal(transformed, null, 'bundlable package imports remain ordinary imports');
 
     const nativeApplication = await transformSource(
       "import create from 'native-package';const app=create();app.get('/',()=>42);app.listen(3000,()=>{});",
@@ -176,7 +205,7 @@ test('bundling is the default; Node built-ins are not grounds for excluding a pa
       },
     );
     assert.equal(dynamicUsage, true);
-    assert.match(dynamicModule!.code, /nativeModule as/);
+    assert.match(dynamicModule!.code, /nativeModule:__lumiana/);
     assert.match(dynamicModule!.code, /\(name,null,"dynamic\.cjs"\)/);
   } finally {
     await fs.rm(temp, { recursive: true, force: true });

@@ -1,177 +1,131 @@
 # Project memory
 
 The user designated `agent/` as the assistant's project memory on 2026-09-05.
-Read this file when resuming work. Keep durable decisions, relevant findings,
-and remaining work here or in linked files in this directory. Update stale
-information and verify implementation details against the source. Never store
-credentials or secrets here.
+Read this file when resuming work. Keep durable decisions, findings, and remaining
+work here. Verify details against source and never store credentials or secrets.
 
 ## Working agreements
 
-- Use Bun 1.3.14 for package management and scripts (`bun install`, `bun run
-test`), with separate text `bun.lock` files for root, example, and playground.
-  Node.js remains the execution runtime; use `bun run test`, not `bun test`.
-- The example consumes this checkout through `lumiana: "link:lumiana"`.
-  Build the root and run `bun link` there before installing example dependencies.
-  Bun's `link:` protocol uses its global registry; `link:..` is not a relative
-  symlink. `file:..` recursively copies the parent tree, so do not use it here.
-- Bun migration was verified in a fresh temporary checkout with frozen installs,
-  all ten Node tests, both Vite 6/8 builds, and a package dry run. The registered
-  `lumiana` link points back to this working checkout after validation.
-- Keep the architecture and public API simple and clean.
-- Understand underlying causes; avoid workaround-based fixes.
-- Reason through domains and contracts. Consumers use contracts; a particular
-  consumer must not define the shared abstraction.
+- Use Bun 1.3.14 for package management and scripts. Node.js remains the runtime;
+  use `bun run test`, not `bun test`.
+- The example consumes this checkout through `lumiana: "link:lumiana"`. Build and
+  register the root with `bun link` before installing the example.
+- Keep the public API small and preserve it while the runtime changes.
+- Explain causes and contracts. Do not fix consumers with package-name exceptions,
+  allowlists, cached reflection, or other behavior-changing workarounds.
+- The browser owns everything that JavaScript can implement locally. Only operating
+  system operations and genuinely native implementations cross the connection.
+- Instances consume runtime contracts; Express, Elysia, Fastify, Hono, and other
+  packages must never define shared abstractions.
 - The user authorizes routine project work without repeated confirmation.
-  Follow any applicable environment permission requirements.
 
-## Current context
+## Public contract
 
-- The project is Lumiana, a Vite integration for browser access to native Node.js
-  handlers across a remote boundary.
-- The user is reviewing runtime placement and request-count optimization.
-- Application runtime exports currently include `lumiana`, `connect`, `node`,
-  and `Buffer` from `lumiana/client`. The Vite plugin is `lumiana` from `lumiana`.
-- Static property chains now share one invocation while their intermediate
-  values remain native references. `process.env.HOME` uses one XHR. This is a
-  general compiler/reference optimization, not a module or property allowlist.
-- Portable intrinsic expressions use copied operation graphs. The owner executes
-  the graph atomically when the browser intrinsic retains its captured identity;
-  replacement functions fall back to normal reference semantics with the correct
-  receiver. `JSON.stringify(process.env)` now takes one synchronous request and
-  does not cache or snapshot the environment.
-- Static named ESM exports with local implementations are analyzed through their
-  lexical binding dependencies. Implementations that transitively require native
-  capabilities can execute in the Worker while independent packages remain
-  bundled. Direct built-in re-exports do not move their package. In the example,
-  Hono stays browser-side and `@hono/node-server`'s `serve` export runs natively;
-  loading and starting it takes two synchronous requests. The deployment manifest
-  includes `@hono/node-server` automatically, and an end-to-end HTTP test reaches
-  the browser Hono handler.
-- Static bindings from one native import now load in one synchronous request.
-  Calls such as `app.get('/', callback)` combine a remote method read and apply
-  when every argument is statically free of observable evaluation effects.
-  Unstable arguments retain separate native reflection so getter/argument order
-  remains exact. The real Express integration performs four application
-  operations at startup; Express adds four callback-reflection replies because
-  it inspects live browser-owned functions, for eight HTTP requests in the test.
-- `node:util` is in the portable built-in domain with `node:events` and
-  `node:buffer`, backed by the maintained `util` browser package. Native
-  `util.inherits(Boot, EventEmitter)` mutated a copied `Boot.prototype` because
-  plain records cross by value, leaving Fastify without `setMaxListeners`.
-  Executing `inherits` beside its caller-owned constructors preserves prototype
-  identity. A generic inheritance fixture covers this placement. A production
-  Vite 8 Fastify bundle was executed through the real host/Worker transport and
-  successfully served `Hello from Fastify`; its un-awaited `listen()` needed
-  time to settle before the measurement request.
-- Placement validates the static exports requested from a conditional browser
-  entry. If that resolved file omits a requested export and the package's Node
-  entry provides it, the import executes natively and the package is included in
-  deployment. This is an export contract, not a package-name exception. It fixes
-  `import { WebSocketServer } from 'ws'`: Vite selects `ws/browser.js`, which has
-  no such export, while the Node entry provides it. A synthetic conditional
-  package covers the compiler rule and the real `ws` server is constructed and
-  exchanges binary data through the host/Worker integration test.
-- `Invocation.path` carries reads; `Graph.path` resumes any remaining reads at
-  the caller when values copy or references return home. Preserve snapshot,
-  getter, error, receiver, assignment, and computed-key behavior. Do not cache
-  live property values as a latency shortcut.
-- `access.ts` / `lumiana/internal` is a small reader runtime with a shared weak
-  ownership registry. It has no connection dependency, so local reads work before
-  connection and bundled CommonJS libraries retain their original module format.
-  The compiler still preserves ordinary public imports.
-- Linked installations can place `access.js` and `client.js` outside Vite's root.
-  The plugin adds these exact browser entries to the resolved `server.fs.allow`
-  list, preserving detected workspace paths and explicit configuration. Optimized
-  dependencies may request them before application import analysis grants access.
-  Regression coverage checks both allow-list modes, dependent browser assets, and
-  continued rejection of server runtime files. `JSON.stringify(process.env)` also
-  passes through the real HTTP client test. All eleven tests and type checking
-  pass; the linked Vite 8 example returns HTTP 200 for `access.js`.
-- Chain and execution-placement validation: all eleven automated tests and type checking pass;
-  Vite 6 and 8 example builds pass. Request-count tests use real HTTP through an
-  XHR test shim and separate Workers. Additional checks cover local reads before connection,
-  separately bundled readers, CommonJS strict mode, Vite metadata, and execution
-  of built browser Buffer code. Changed files pass formatting.
-- Connection establishment uses `await connect.credentials(...)`.
-- Plugin credential options are nested under
-  `defaultCredentials: { username, password }`; top-level plugin `username` and
-  `password` options were removed. Client connection credentials stay flat.
-- Environment credentials (`LUMIANA_USERNAME`, `LUMIANA_PASSWORD`) override
-  `defaultCredentials` consistently in dev, preview, and standalone production.
-  Generated deployment defaults come from plugin configuration, not build-time
-  environment credentials. The standalone listener uses `LUMIANA_PORT` and
-  `LUMIANA_HOST` (defaults 3883 and 127.0.0.1); Vite retains its own listener options.
-- Production startup prints a readable ready message and an HTTP URL with the
-  actual bound port and Vite base path. Wildcard binds use a loopback URL;
-  IPv6 URL hosts are bracketed.
-- Bootstrap examples should use the instance returned by
-  `connect.credentials(...)`. The imported global singleton is intended for
-  use inside the connected hybrid application.
-- Keep introductory examples minimal and runnable without assumed files or
-  elaborate setup/cleanup. The README demonstrates `hostname()` from `node:os`
-  alongside a DOM update; the user found the temporary-file example too complex.
-- The client singleton provides `status()` for main server status and
-  `disconnect()`. Native module imports work through the plugin; `node()` is an
-  optional explicit resolver.
-- `vite preview` now serves the browser build from `<outDir>/public` and attaches
-  the shared native host in production mode. Native modules resolve against the
-  project root for local preview. Example and playground preview scripts use
-  `vite preview`; standalone deployment still uses the generated `main.mjs`.
-- Preview integration coverage checks default/custom output directories and base
-  paths, credentials, built assets, WebSocket status, synchronous native calls,
-  and shutdown. The suite also verifies chain semantics and actual request counts.
-- The full formatting check currently flags the existing `example/src/entry.ts`;
-  files changed for preview pass formatting. Do not reformat unrelated user code
-  as part of this task.
-- Proposed, but not implemented or specifically requested: move the six
-  plugin-facing internal helpers out of the public client entry point.
+- `lumiana()` from `lumiana` is the Vite plugin.
+- `lumiana`, `connect`, `node`, and `Buffer` are exported from `lumiana/client`.
+- `await connect.credentials({ username, password, url? })` activates and returns
+  the single browser-context instance. Repeating the same connection returns it;
+  concurrent or different active connections throw.
+- `lumiana.status()` reports the main server status. `lumiana.disconnect()` ends
+  the connection and its dedicated Worker. Either side stopping stops the other.
+- Imports remain ordinary Node package/builtin imports. `node(specifier)` is an
+  optional explicit native resolver and rejects before connection.
+- Credentials are configured under `defaultCredentials`. `LUMIANA_USERNAME` and
+  `LUMIANA_PASSWORD` override them. Standalone production uses `LUMIANA_HOST` and
+  `LUMIANA_PORT`.
+- `nodeModules` explicitly excludes matching packages. Other packages are bundled
+  unless resolution or build analysis proves they cannot be bundled. Importing a
+  Node builtin alone is never grounds for exclusion.
+- Vite dev, Vite preview, and standalone deployment are supported.
 
-## Next work
+## Architecture
 
-Do not reduce live callback-reflection requests through metadata caching; it is
-observably incorrect for mutable functions and Proxies. Further reductions for
-frameworks that pass large application graphs into native adapters require a
-general co-location/execution-region contract, not framework-specific rewrites.
-The retained native-factory placement starts the real Elysia example in 28
-synchronous HTTP exchanges in the current Node 24/Vite 8 environment and serves
-an actual request successfully.
-An experiment kept `@elysia/node`'s record factory bundled and propagated Node
-export conditions through its dependencies. It preserved the correct Node
-`crossws`/`srvx` implementation but produced 211 synchronous exchanges at real
-startup because low-level server classes then reflected across the boundary.
-That experiment was reverted. Moving the adapter graph alone is not a valid
-optimization; Elysia and its native adapter would need a shared execution region.
+- Work is on branch `runtime/remote-kernel`; the first kernel milestone is commit
+  `ed89f9f`.
+- The browser-owned runtime contains ordinary local objects, constructors, streams,
+  event emitters, callbacks, and binary buffers. The Worker owns opaque operating
+  system handles. Kernel commands/events use the existing binary MessagePack
+  WebSocket and close with their connection.
+- Runtime contracts currently exist for `node:fs/promises`, `node:net`, and the
+  HTTP server half of `node:http`. Filesystem handles, TCP/Unix sockets, and HTTP
+  listeners live in the Worker; all surrounding JavaScript behavior is local.
+- Pure/local builtins currently include assert, buffer, crypto, events, module,
+  path, process state, querystring, stream, stream/promises, string_decoder,
+  timers, url, util, and zlib. Crypto fills arbitrary-sized binary views by
+  respecting Web Crypto's 65,536-byte call limit.
+- `node:https`, `node:http2`, and `node:tls` expose local import-time facades. Their
+  current operational methods still use native execution because their socket and
+  protocol runtime domains have not yet been implemented locally.
+- Implicit `process` is a stable local object initialized from a plain snapshot at
+  authenticated connection. `process.env` is a null-prototype object; reads and
+  `JSON.stringify(process.env)` make zero boundary calls.
+- `node:module` has a local `createRequire`. The compiler preserves each source
+  module's origin. Supported CommonJS builtins return local constructors. Static
+  missing optional dependencies are proven at build time and throw local
+  `MODULE_NOT_FOUND`, allowing a package's own JavaScript fallback without a call.
+- Dependency modules that explicitly consume the Node execution contract resolve
+  their dependencies with Node export conditions. Application composition roots
+  retain browser conditions for unrelated imports. This selects Node adapters
+  from conditional packages through source semantics, without package names.
+- `global` resolves to `globalThis`. Unbound `setImmediate`/`clearImmediate` use the
+  local timer runtime. Dynamic or genuinely native module resolution stays remote.
+- Unqualified `fetch` and `WebSocket` use hybrid routing: same-origin stays in the
+  browser and other origins execute remotely. Explicit `window.*` stays local.
+- Primitive values and plain records copy. Functions, class instances, symbols,
+  arrays, and other non-plain values retain owner references. Binary values remain
+  binary through MessagePack.
 
-## Remote kernel branch
+## Validation and findings
 
-- Work continues on `runtime/remote-kernel` from commit `9354a71`. Current changes
-  are intentionally uncommitted while the runtime contracts are expanded.
-- Browser-owned implementations now exist for `node:fs/promises`, `node:net`, and
-  the HTTP server half of `node:http`. Their JavaScript objects, prototypes,
-  streams, event emitters, callbacks, and buffers stay in the browser. Per-session
-  Worker kernels own only filesystem handles, OS sockets, and HTTP listeners.
-  Kernel commands and events use the established binary MessagePack WebSocket;
-  disconnect closes all handles on both sides.
-- Pure built-ins currently mapped locally are assert, buffer, events, path,
-  process, querystring, stream, string_decoder, url, and util. Runtime-owned
-  polyfills resolve from Lumiana's installation even when Lumiana is linked into
-  a project outside its repository.
-- A runtime-selected `require(expression)` is now transformed at the expression.
-  It no longer causes the package containing it to be excluded from the browser
-  bundle. This keeps Express local while preserving native module resolution for
-  optional view engines if that branch executes.
-- A real Express 5 application has been verified in Vite 8 and in the automated
-  host/Worker integration test. Its router and response logic execute locally,
-  its OS HTTP listener executes in the Worker, binary transport uses the existing
-  WebSocket, and startup/request handling performs zero synchronous XHR calls.
-- Runtime unit tests cover local filesystem values and handles, Dirent behavior,
-  TCP binary echo, and HTTP message/response classes. The canonical test command
-  passes 16 tests, including dev, preview, placement, isolation, MessagePack,
-  Express, and lifecycle coverage. Type checking and production builds pass.
-- Remaining runtime domains include callback and synchronous `node:fs`, file
-  streams and watchers; HTTP client APIs, upgrades and backpressure; TLS, DNS,
-  UDP, child processes and workers; crypto/zlib/async context; native-addon
-  adapters; and broader Fastify/Elysia/socket/filesystem/native-package
-  compatibility tests. The compiler also still needs the general asynchronous
-  transaction model for synchronous-looking source operations.
+- Real Express 5 runs with its application graph local and zero synchronous XHR at
+  startup. HTTP requests reach the Worker listener and execute browser callbacks.
+- Real Fastify 5 serves successfully after keeping `util.inherits`, constructors,
+  and prototype mutation in one local identity domain.
+- Real Elysia 1.4 with `@elysia/node` works in Vite 8 dev and preview. Its source
+  selects the Node `srvx` adapter, `GET /` returns `200 Hello Elysia`, and startup
+  now makes zero synchronous boundary calls (previously 26).
+- HTTP response handles remain valid until the browser stream's ordered `end()`
+  command completes. A declared content length can make Node emit `close` before
+  that command arrives. Writes acknowledge immediately when Node reports no
+  backpressure; this removes the close/end race without hiding invalid writes.
+- Elysia's 26 calls were not one problem: global/timer reflection, crypto/zlib and
+  stream imports, TLS/HTTP facades, and two absent CrossWS accelerators. Local
+  runtime contracts removed the first groups. Build-time module availability
+  removed `bufferutil` and `utf-8-validate` calls by preserving CrossWS's own
+  fallback semantics.
+- The canonical suite passes 21 tests, including CommonJS format preservation,
+  1 MiB local random fill, binary
+  gzip round trips, and local failure of statically absent optional dependencies.
+  Type checking and the production example build pass.
+- CommonJS sources must never receive injected ESM imports or browser runtime
+  `require()` calls. Connection-dependent helpers are read from the internal
+  `Symbol.for('lumiana.runtime')` browser-context registry initialized by the
+  client. The reference-reader primitive bootstraps independently through
+  `Symbol.for('lumiana.readPath')` and its shared WeakMap, avoiding a cycle when
+  the client itself loads CommonJS dependencies such as `buffer`.
+- The real `@phreshos/node` 0.1.15 example now builds and runs in both Vite 8 dev
+  and preview. `System.connect()` succeeds and `system.program.list()` returns an
+  array. Its current startup makes 28 synchronous native calls, mainly synchronous
+  filesystem, OS, child-process, and Jiti VM/module operations; these belong to
+  runtime domains still awaiting local object models and transaction support.
+- A packet-level trace accounts for all 28 PhreshOS calls: 10 static native binding
+  loads (`fs`, `os`, and `child_process`), 7 whole-module loads from AdmZip/Jiti
+  (`fs`, `os`, `v8`, `tty`, `perf_hooks`, and `vm`), 7 Jiti compatibility/reflection
+  operations, and 4 actual startup calls (two `homedir()`, `existsSync()`, and
+  `realpathSync()`). The Unix-socket connection and `program.list()` use the async
+  MessagePack WebSocket and add no synchronous XHR. The package root re-exports
+  Project/storage/shell modules and has no `sideEffects: false`, while eager remote
+  binding acquisition is itself a side effect, so the bundler cannot discard those
+  otherwise unused paths. Local builtin module objects should remove the 24 setup
+  calls; local OS snapshots remove `homedir`, leaving the genuinely synchronous
+  filesystem decisions for the general transaction/async-lifting design.
+
+## Remaining runtime domains
+
+- Callback and synchronous `node:fs`, file streams, watchers, and complete metadata.
+- HTTP clients, upgrades, full backpressure, TLS and HTTP/2 local object models.
+- DNS, UDP, child processes, worker threads, async context, and process lifecycle.
+- Native-addon adapters and broader compatibility fixtures for server, filesystem,
+  socket, and native-environment packages.
+- A general asynchronous transaction/compiler model for synchronous-looking source
+  operations that must cross. Existing synchronous native references still use XHR.

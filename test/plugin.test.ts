@@ -82,6 +82,29 @@ test('Vite builds browser packages and deploys only proven or explicit native de
         exports: { browser: './browser.js', import: './node.js', default: './node.js' },
       },
     );
+    await pkg(
+      'node-adapter',
+      {
+        'index.js':
+          "import server from 'universal-server';process.on('beforeExit',()=>{});export default server;",
+      },
+      { type: 'module' },
+    );
+    await pkg(
+      'universal-server',
+      {
+        'browser.js': "export default 'service-worker-server';",
+        'node.js': "export default 'node-condition-server';",
+      },
+      {
+        type: 'module',
+        exports: {
+          browser: './browser.js',
+          node: './node.js',
+          default: './browser.js',
+        },
+      },
+    );
     await pkg('native-addon', {
       'index.js': "module.exports=require('./binding.node');",
       'binding.node': 'binary native-proof',
@@ -97,7 +120,7 @@ test('Vite builds browser packages and deploys only proven or explicit native de
     );
     await fs.writeFile(
       path.join(root, 'entry.js'),
-      "import {value,tmpdir} from 'portable';import cjs from 'browser-cjs';import inheritance from 'portable-inheritance';import environment from 'node-environment-library';import {filesystemProof} from 'filesystem-library';import {socketProof} from 'socket-library';import condition from 'conditional';import {WebSocketServer} from 'conditional-server';import addon from 'native-addon';import explicit from 'explicit';export * from 'node:os';const server=new WebSocketServer();document.body.textContent=[value,tmpdir(),cjs(),inheritance(),environment(),filesystemProof,socketProof,condition,server.kind,addon,explicit].join(',');",
+      "import {value,tmpdir} from 'portable';import cjs from 'browser-cjs';import inheritance from 'portable-inheritance';import environment from 'node-environment-library';import {filesystemProof} from 'filesystem-library';import {socketProof} from 'socket-library';import condition from 'conditional';import {WebSocketServer} from 'conditional-server';import adapter from 'node-adapter';import addon from 'native-addon';import explicit from 'explicit';export * from 'node:os';const server=new WebSocketServer();document.body.textContent=[value,tmpdir(),cjs(),inheritance(),environment(),filesystemProof,socketProof,condition,server.kind,adapter,addon,explicit].join(',');",
     );
     await build({
       root,
@@ -125,8 +148,10 @@ test('Vite builds browser packages and deploys only proven or explicit native de
       'filesystem-runtime-proof',
       'socket-runtime-proof',
       'browser-condition-proof',
+      'node-condition-server',
     ])
       assert.ok(output.includes(text), text);
+    assert.ok(!output.includes('service-worker-server'));
     assert.ok(!output.includes('"node:util"'));
     for (const text of [
       'browser-client-proof',

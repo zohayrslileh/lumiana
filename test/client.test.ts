@@ -163,6 +163,7 @@ test('client contract through real HTTP, binary WebSocket and an isolated native
       origin,
       client: new URL('../dist/client.js', import.meta.url).href,
       access: new URL('../dist/access.js', import.meta.url).href,
+      process: new URL('../dist/runtime/process.js', import.meta.url).href,
     });
     return import(
       'data:text/javascript;base64,' + Buffer.from(result?.code ?? source).toString('base64')
@@ -276,16 +277,16 @@ test('client contract through real HTTP, binary WebSocket and an isolated native
     } finally {
       await fs.rm(expressDirectory, { recursive: true, force: true });
     }
-    node('node:process').env.LUMIANA_STRINGIFY_TEST = 'stringify-ok';
     const beforeStringify = XMLHttpRequest.requests;
     const serialized = await compile(
-      'export const value = JSON.parse(JSON.stringify(process.env)).LUMIANA_STRINGIFY_TEST;',
+      'export const environment = process.env;export const value = JSON.parse(JSON.stringify(process.env)).HOME;',
     );
-    assert.equal(serialized.value, 'stringify-ok');
+    assert.equal(serialized.value, process.env.HOME);
+    assert.equal(Object.getPrototypeOf(serialized.environment), null);
     assert.equal(
       XMLHttpRequest.requests - beforeStringify,
-      1,
-      'portable intrinsic and native argument execute as one operation',
+      0,
+      'the browser-owned environment needs no native reflection',
     );
     const customized = await compile('export const read = () => JSON.stringify(process.env);');
     const originalStringify = JSON.stringify;
@@ -299,7 +300,7 @@ test('client contract through real HTTP, binary WebSocket and an isolated native
     }
     const beforeHome = XMLHttpRequest.requests;
     assert.equal((await compile('export const value = process.env.HOME;')).value, process.env.HOME);
-    assert.equal(XMLHttpRequest.requests - beforeHome, 1, 'global property chain takes one XHR');
+    assert.equal(XMLHttpRequest.requests - beforeHome, 0, 'local process reads need no XHR');
     const beforeModule = XMLHttpRequest.requests;
     const moduleRead = await compile("export const value = require('node:fs').constants.F_OK;");
     assert.equal(moduleRead.value, 0);

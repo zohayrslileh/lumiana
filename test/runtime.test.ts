@@ -11,6 +11,37 @@ import { HttpKernel } from '../src/kernel/http.js';
 import { createFileSystem } from '../src/runtime/filesystem.js';
 import { createNetwork } from '../src/runtime/network.js';
 import { createHttp } from '../src/runtime/http-core.js';
+import { createRequire } from '../src/runtime/module.js';
+import crypto from '../src/runtime/crypto.js';
+import zlib from '../src/runtime/zlib.js';
+
+test('createRequire keeps portable CommonJS constructors local', () => {
+  const require = createRequire(import.meta.url, 'test/runtime.test.ts');
+  const EventEmitter = require('events');
+  const stream = require('stream');
+  const assertModule = require('assert');
+  assert.equal(new EventEmitter() instanceof EventEmitter, true);
+  assert.equal(new stream.PassThrough() instanceof stream.PassThrough, true);
+  assert.equal(typeof assertModule.equal, 'function');
+});
+
+test('crypto and compression execute locally with binary Node-compatible values', () => {
+  const bytes = crypto.randomFillSync(Buffer.alloc(1024 * 1024));
+  assert.equal(bytes.byteLength, 1024 * 1024);
+  assert.equal(
+    crypto.createHash('sha256').update('lumiana').digest('hex'),
+    'eddec645f3362a73ebb250129b196d57253d78f670655ab9a9472eaf814c1893',
+  );
+  assert.deepEqual(zlib.gunzipSync(zlib.gzipSync(bytes)), bytes);
+});
+
+test('createRequire rejects a statically unavailable optional dependency locally', () => {
+  const require = createRequire(import.meta.url, 'package/index.js', ['optional-native']);
+  assert.throws(
+    () => require('optional-native'),
+    (error: any) => error.code === 'MODULE_NOT_FOUND',
+  );
+});
 
 test('filesystem values stay local while the kernel receives operations and opaque handles', async () => {
   const directory = await fs.mkdtemp(path.join(os.tmpdir(), 'lumiana-kernel-'));
@@ -149,6 +180,8 @@ test('HTTP application callbacks and message objects execute locally', async () 
     assert.equal(response.headers.get('x-lumiana'), 'local');
     assert.equal(requestPrototype, 'IncomingMessage');
     assert.equal(responsePrototype, 'ServerResponse');
+    await kernel.execute('http.request.resume', [2]);
+    await kernel.execute('http.response.destroy', [3]);
     server.close();
     await once(server, 'close');
   } finally {

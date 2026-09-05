@@ -1,0 +1,53 @@
+import processShim from 'process/browser';
+
+export interface ProcessSnapshot {
+  env: Record<string, string>;
+  argv: string[];
+  execArgv: string[];
+  platform: string;
+  arch: string;
+  version: string;
+  versions: Record<string, string>;
+  pid: number;
+  cwd: string;
+}
+
+interface ProcessState {
+  runtime: typeof processShim & Record<string, any>;
+  env: Record<string, string>;
+  directory: string;
+}
+
+const key = Symbol.for('lumiana.process');
+const scope = globalThis as typeof globalThis & { [key]: ProcessState };
+const state: ProcessState = (scope[key] ??= {
+  runtime: processShim as typeof processShim & Record<string, any>,
+  env: Object.create(null),
+  directory: '/',
+});
+const { runtime, env } = state;
+
+if (runtime.env !== env) {
+  Object.defineProperty(runtime, 'env', {
+    configurable: false,
+    enumerable: true,
+    value: env,
+  });
+  runtime.cwd = () => state.directory;
+}
+
+/** Replace connection-owned process state without changing object identity. */
+export function initializeProcess(snapshot: ProcessSnapshot): void {
+  for (const key of Object.keys(env)) delete env[key];
+  Object.assign(env, snapshot.env);
+  state.directory = snapshot.cwd;
+  for (const key of ['argv', 'execArgv', 'platform', 'arch', 'version', 'versions', 'pid'] as const)
+    Object.defineProperty(runtime, key, {
+      configurable: true,
+      enumerable: true,
+      writable: true,
+      value: snapshot[key],
+    });
+}
+
+export default runtime;

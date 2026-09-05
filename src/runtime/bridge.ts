@@ -3,14 +3,21 @@ import type { KernelCall } from './filesystem.js';
 interface KernelBridge {
   owner: object;
   call: KernelCall;
+  load: (specifier: string, origin?: string, path?: string[]) => any;
   listeners: Map<number, Set<(event: string, args: any[]) => void>>;
 }
 
 const key = Symbol.for('lumiana.kernel');
 const scope = globalThis as any;
 
-export function installKernel(owner: object, call: KernelCall): void {
-  scope[key] = { owner, call, listeners: new Map() } satisfies KernelBridge;
+export function installKernel(owner: object, call: KernelCall, load: KernelBridge['load']): void {
+  scope[key] = { owner, call, load, listeners: new Map() } satisfies KernelBridge;
+}
+
+export function nativeRequire(specifier: string, origin?: string, path?: string[]): any {
+  const bridge = scope[key] as KernelBridge | undefined;
+  if (!bridge) throw new Error('Lumiana is not connected. Call await connect.credentials() first.');
+  return bridge.load(specifier, origin, path);
 }
 
 export function removeKernel(owner: object): void {

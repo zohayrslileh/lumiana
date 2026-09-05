@@ -13,37 +13,9 @@ import type { NativeExpression } from './protocol.js';
 export interface Placement {
   native: boolean;
   reason?: string;
-  nativeExports?: string[];
+  available?: boolean;
 }
-const portableBuiltins = new Set([
-  'buffer',
-  'node:buffer',
-  'events',
-  'node:events',
-  'util',
-  'node:util',
-  'fs/promises',
-  'node:fs/promises',
-  'assert',
-  'node:assert',
-  'path',
-  'node:path',
-  'process',
-  'node:process',
-  'querystring',
-  'node:querystring',
-  'stream',
-  'node:stream',
-  'string_decoder',
-  'node:string_decoder',
-  'url',
-  'node:url',
-  'net',
-  'node:net',
-  'http',
-  'node:http',
-]);
-const nativeGlobals = new Set(['process', 'global', 'setImmediate', 'clearImmediate']);
+const nativeGlobals = new Set<string>();
 
 function unwrapExpression(node: any): any {
   while (
@@ -60,75 +32,73 @@ function unwrapExpression(node: any): any {
   return node;
 }
 
-/** Find exports whose implementation transitively depends on a native capability. */
-function nativeCapabilityExports(source: string): string[] {
-  const ast = parseCode(source);
-  let program: any;
-  traverse(ast as any, {
-    Program(path: any) {
-      program = path;
-    },
-  });
-  const exports = new Map<string, string>();
-  for (const node of ast.program.body as any[]) {
-    if (node.type === 'ExportNamedDeclaration') {
-      if (node.declaration?.id?.name)
-        exports.set(node.declaration.id.name, node.declaration.id.name);
-      for (const declaration of node.declaration?.declarations ?? [])
-        if (declaration.id.type === 'Identifier')
-          exports.set(declaration.id.name, declaration.id.name);
-      if (!node.source)
-        for (const specifier of node.specifiers)
-          if (specifier.local?.name)
-            exports.set(specifier.exported.name ?? specifier.exported.value, specifier.local.name);
-    } else if (node.type === 'ExportDefaultDeclaration') {
-      const local = node.declaration?.id?.name ?? node.declaration?.name;
-      if (local) exports.set('default', local);
-    }
-  }
-  const memo = new Map<any, boolean>(),
-    visiting = new Set<any>();
-  const depends = (binding: any): boolean => {
-    if (!binding) return false;
-    if (memo.has(binding)) return memo.get(binding)!;
-    if (visiting.has(binding)) return false;
-    visiting.add(binding);
-    const declaration = binding.path.parentPath;
-    if (declaration?.isImportDeclaration()) {
-      const source = declaration.node.source.value;
-      const result = isBuiltin(source) && !portableBuiltins.has(source);
-      visiting.delete(binding);
-      memo.set(binding, result);
-      return result;
-    }
-    let result = false;
-    binding.path.traverse({
-      ReferencedIdentifier(path: any) {
-        if (result) return;
-        const dependency = path.scope.getBinding(path.node.name);
-        if (!dependency) result = nativeGlobals.has(path.node.name);
-        else if (dependency !== binding) result = depends(dependency);
-      },
-    });
-    visiting.delete(binding);
-    memo.set(binding, result);
-    return result;
-  };
-  return [...exports]
-    .filter(([, local]) => {
-      const binding = program.scope.getBinding(local);
-      // A direct re-export is already a native reference after normal bundling.
-      // Moving its package would add no execution locality.
-      return binding && !binding.path.isImportSpecifier() && depends(binding);
-    })
-    .map(([name]) => name);
-}
 const parseCode = (source: string) =>
   parse(source, {
     sourceType: 'unambiguous',
     plugins: ['typescript', 'jsx'],
     allowReturnOutsideFunction: true,
   });
+
+/** Whether this module explicitly consumes the Node execution environment. */
+export function requiresNodeResolution(source: string): boolean {
+  const ast = parseCode(source);
+  let required = false;
+  const isProcess = (node: any) => node?.type === 'Identifier' && node.name === 'process';
+  const property = (node: any) =>
+    node.computed && node.property?.type === 'StringLiteral'
+      ? node.property.value
+      : !node.computed && node.property?.type === 'Identifier'
+        ? node.property.name
+        : undefined;
+
+  traverse(ast as any, {
+    ImportDeclaration(path: any) {
+      if (path.node.source.value.startsWith('node:')) required = true;
+    },
+    ExportNamedDeclaration(path: any) {
+      if (path.node.source?.value.startsWith('node:')) required = true;
+    },
+    ExportAllDeclaration(path: any) {
+      if (path.node.source.value.startsWith('node:')) required = true;
+    },
+    CallExpression(path: any) {
+      const callee = path.node.callee;
+      if (
+        callee.type === 'Identifier' &&
+        callee.name === 'require' &&
+        !path.scope.getBinding('require') &&
+        path.node.arguments[0]?.type === 'StringLiteral' &&
+        path.node.arguments[0].value.startsWith('node:')
+      )
+        required = true;
+    },
+    MemberExpression(path: any) {
+      if (
+        isProcess(path.node.object) &&
+        !path.scope.getBinding('process') &&
+        [
+          'on',
+          'once',
+          'off',
+          'addListener',
+          'removeListener',
+          'emit',
+          'chdir',
+          'getBuiltinModule',
+        ].includes(property(path.node))
+      )
+        required = true;
+    },
+    ReferencedIdentifier(path: any) {
+      if (
+        ['__dirname', '__filename'].includes(path.node.name) &&
+        !path.scope.getBinding(path.node.name)
+      )
+        required = true;
+    },
+  });
+  return required;
+}
 export const packageName = (id: string) =>
   id.startsWith('@') ? id.split('/').slice(0, 2).join('/') : id.split('/')[0]!;
 export const bare = (id: string) =>
@@ -159,9 +129,6 @@ export class Bundling {
     if (id === undefined) this.dynamic = true;
     else if (bare(id) && !isBuiltin(id))
       this.external.set(packageName(id), 'Native handler requested through node()');
-  }
-  segment(id: string): void {
-    if (!isBuiltin(id)) this.external.set(packageName(id), 'Native-dependent export');
   }
   unavailable(id: string, names: string[]): Placement {
     const reason = `Browser condition omits ${names.join(', ')}`;
@@ -251,12 +218,7 @@ export class Bundling {
         ],
       });
       if (reason) return { native: true, reason };
-      let nativeExports: string[] = [];
-      if (/\.[cm]?[jt]sx?$/.test(file))
-        try {
-          nativeExports = nativeCapabilityExports(await fs.readFile(file, 'utf8'));
-        } catch {}
-      return { native: false, nativeExports };
+      return { native: false };
     } catch (error: any) {
       return { native: true, reason: error.errors?.[0]?.text ?? error.message };
     }
@@ -291,8 +253,9 @@ export interface TransformOptions {
   place(id: string, requiredExports?: string[]): Promise<Placement>;
   client?: string;
   access?: string;
+  process?: string;
+  timers?: string;
   nativeUsage?(id?: string): void;
-  nativeSegment?(id: string): void;
   origin?: string;
   nativeOrigin?(specifier: string): void;
   names?(id: string): Promise<string[]>;
@@ -429,9 +392,23 @@ export async function transformSource(source: string, id: string, options: Trans
     members: any[] = [],
     calls: any[] = [],
     variables: any[] = [];
+  const contextualRequire = new Set<any>();
+  const contextualCalls: any[] = [];
   let counter = 0;
   const reserved = new Set<string>();
   traverse(ast as any, {
+    ImportDeclaration(p: any) {
+      if (p.node.source.value.replace(/^node:/, '') !== 'module') return;
+      for (const specifier of p.node.specifiers) {
+        if (
+          specifier.type === 'ImportSpecifier' &&
+          (specifier.imported.name ?? specifier.imported.value) === 'createRequire'
+        ) {
+          const binding = p.scope.getBinding(specifier.local.name);
+          if (binding) contextualRequire.add(binding);
+        }
+      }
+    },
     Identifier(p: any) {
       reserved.add(p.node.name);
     },
@@ -450,6 +427,9 @@ export async function transformSource(source: string, id: string, options: Trans
     fetchName = name(),
     socketName = name(),
     bufferName = name(),
+    processName = name(),
+    immediateName = name(),
+    clearImmediateName = name(),
     readName = name(),
     evaluateName = name(),
     invokeName = name();
@@ -457,7 +437,46 @@ export async function transformSource(source: string, id: string, options: Trans
   const esm = ast.program.body.some(
     (node) => node.type.startsWith('Import') || node.type.startsWith('Export'),
   );
-  let commonjs = false;
+  if (options.origin) {
+    traverse(ast as any, {
+      CallExpression(p: any) {
+        if (p.node.arguments.length !== 1 || p.node.callee.type !== 'Identifier') return;
+        if (contextualRequire.has(p.scope.getBinding(p.node.callee.name))) contextualCalls.push(p);
+      },
+    });
+    for (const factory of contextualCalls) {
+      const declaration = factory.parentPath;
+      const binding =
+        declaration.isVariableDeclarator() && declaration.node.id.type === 'Identifier'
+          ? declaration.scope.getBinding(declaration.node.id.name)
+          : undefined;
+      const unavailable = new Set<string>();
+      for (const reference of binding?.referencePaths ?? []) {
+        const call = reference.parentPath;
+        const argument = call?.node.arguments[0];
+        const specifier =
+          argument?.type === 'StringLiteral'
+            ? argument.value
+            : argument?.type === 'TemplateLiteral' && argument.expressions.length === 0
+              ? argument.quasis[0].value.cooked
+              : undefined;
+        if (
+          call?.isCallExpression() &&
+          call.node.callee === reference.node &&
+          specifier !== undefined
+        ) {
+          if ((await options.place(specifier)).available === false) unavailable.add(specifier);
+        }
+      }
+      edits.appendLeft(
+        factory.node.arguments[0].end,
+        `,${JSON.stringify(options.origin)},${JSON.stringify([...unavailable])}`,
+      );
+    }
+  }
+  let commonjs = false,
+    usesProcess = false,
+    usesTimers = false;
   traverse(ast as any, {
     MemberExpression: {
       exit(p: any) {
@@ -558,51 +577,6 @@ export async function transformSource(source: string, id: string, options: Trans
             ? extendRead(p).keys.slice(0, 1)
             : [];
     const placement = await options.place(specifier, requiredExports);
-    if (!placement.native && n.type === 'ImportDeclaration' && placement.nativeExports?.length) {
-      const nativeExports = new Set(placement.nativeExports);
-      const selected = n.specifiers.filter((specifier: any) => {
-        if (specifier.importKind === 'type') return false;
-        if (specifier.type === 'ImportDefaultSpecifier') return nativeExports.has('default');
-        if (specifier.type !== 'ImportSpecifier') return false;
-        return nativeExports.has(specifier.imported.name ?? specifier.imported.value);
-      });
-      if (selected.length) {
-        options.nativeSegment?.(specifier);
-        used.add('nativeBindings');
-        for (const item of selected) {
-          const binding = p.scope.getBinding(item.local.name);
-          if (binding) remoteBindings.add(binding);
-        }
-        const remaining = n.specifiers.filter((item: any) => !selected.includes(item));
-        const imported = remaining.filter((item: any) => item.type === 'ImportSpecifier');
-        const localImport = remaining.length
-          ? `import ${[
-              ...remaining
-                .filter((item: any) => item.type === 'ImportDefaultSpecifier')
-                .map((item: any) => item.local.name),
-              ...remaining
-                .filter((item: any) => item.type === 'ImportNamespaceSpecifier')
-                .map((item: any) => `* as ${item.local.name}`),
-              ...(imported.length
-                ? [
-                    `{${imported
-                      .map((item: any) => {
-                        const name = item.imported.name ?? item.imported.value;
-                        const binding =
-                          name === item.local.name ? name : `${name} as ${item.local.name}`;
-                        return item.importKind === 'type' ? `type ${binding}` : binding;
-                      })
-                      .join(',')}}`,
-                  ]
-                : []),
-            ].join(',')} from ${JSON.stringify(specifier)};`
-          : '';
-        const declarations = bindingCall(specifier, selected);
-        edits.overwrite(n.start, n.end, localImport + declarations);
-        removed.push([n.start, n.end]);
-      }
-      continue;
-    }
     if (!placement.native) continue;
     options.nativeOrigin?.(specifier);
     const call = (mode?: string) =>
@@ -769,6 +743,17 @@ export async function transformSource(source: string, id: string, options: Trans
     } else if (n.name === 'Buffer') {
       used.add('Buffer');
       replacement = bufferName;
+    } else if (n.name === 'process') {
+      usesProcess = true;
+      replacement = processName;
+    } else if (n.name === 'global') {
+      replacement = 'globalThis';
+    } else if (n.name === 'setImmediate') {
+      usesTimers = true;
+      replacement = immediateName;
+    } else if (n.name === 'clearImmediate') {
+      usesTimers = true;
+      replacement = clearImmediateName;
     } else {
       used.add('nativeGlobal');
       const { end, keys } = extendRead(p);
@@ -803,7 +788,7 @@ export async function transformSource(source: string, id: string, options: Trans
       `${readName}(${edits.slice(root.node.start, root.node.end)},${keys.map((key) => JSON.stringify(key)).join(',')})`,
     );
   }
-  if (!used.size) return null;
+  if (!used.size && !usesProcess && !usesTimers) return null;
   const names: Record<string, string> = {
     nativeModule: nodeName,
     nativeBindings: bindingsName,
@@ -815,17 +800,32 @@ export async function transformSource(source: string, id: string, options: Trans
     evaluateIntrinsic: evaluateName,
     invokeMember: invokeName,
   };
+  const commonRuntime = 'globalThis[Symbol.for("lumiana.runtime")]';
   if (used.delete('readPath')) {
     const access = JSON.stringify(options.access ?? 'lumiana/internal');
     imports.push(
       commonjs
-        ? `const {readPath:${readName}}=require(${access});\n`
+        ? `const ${readName}=(globalThis[Symbol.for("lumiana.readPath")]??=((value,...path)=>{const readers=(globalThis[Symbol.for("lumiana.referenceReaders")]??=new WeakMap());for(let i=0;i<path.length;i++){const read=readers.get(value);if(read)return read(path.slice(i));value=value[path[i]]}return value}));\n`
         : `import {readPath as ${readName}} from ${access};\n`,
     );
   }
+  if (usesProcess)
+    imports.push(
+      commonjs
+        ? `const {process:${processName}}=${commonRuntime};\n`
+        : `import ${processName} from ${JSON.stringify(options.process ?? 'node:process')};\n`,
+    );
+  if (usesTimers)
+    imports.push(
+      commonjs
+        ? `const {setImmediate:${immediateName},clearImmediate:${clearImmediateName}}=${commonRuntime};\n`
+        : `import {setImmediate as ${immediateName},clearImmediate as ${clearImmediateName}} from ${JSON.stringify(options.timers ?? 'node:timers')};\n`,
+    );
   if (used.size)
     imports.push(
-      `import {${[...used].map((key) => `${key} as ${names[key]}`).join(',')}} from ${JSON.stringify(options.client ?? 'lumiana/client')};\n`,
+      commonjs
+        ? `const {${[...used].map((key) => `${key}:${names[key]}`).join(',')}}=${commonRuntime};\n`
+        : `import {${[...used].map((key) => `${key} as ${names[key]}`).join(',')}} from ${JSON.stringify(options.client ?? 'lumiana/client')};\n`,
     );
   const prologue = ast.program.directives.at(-1)?.end ?? ast.program.interpreter?.end ?? 0;
   edits.appendLeft(prologue, (prologue ? '\n' : '') + imports.join(''));

@@ -1,0 +1,120 @@
+import assert from 'assert';
+import * as buffer from 'buffer';
+import crypto from './crypto.js';
+import EventEmitter from 'events';
+import path from 'path-browserify';
+import process from './process.js';
+import querystring from 'querystring-es3';
+import stream from 'stream-browserify';
+import stringDecoder from 'string_decoder';
+import url from 'url';
+import util from 'util';
+import http from './http.js';
+import http2 from './http2.js';
+import https from './https.js';
+import * as net from './net.js';
+import streamPromises from './stream-promises.js';
+import timers from './timers.js';
+import tls from './tls.js';
+import zlib from './zlib.js';
+import { nativeRequire } from './bridge.js';
+
+const local: Record<string, any> = Object.assign(Object.create(null), {
+  assert,
+  buffer,
+  crypto,
+  events: EventEmitter,
+  http,
+  http2,
+  https,
+  net,
+  path,
+  process,
+  querystring,
+  stream,
+  'stream/promises': streamPromises,
+  string_decoder: stringDecoder,
+  url,
+  util,
+  timers,
+  tls,
+  zlib,
+});
+
+const names = new Set([
+  'assert',
+  'assert/strict',
+  'async_hooks',
+  'buffer',
+  'child_process',
+  'cluster',
+  'console',
+  'constants',
+  'crypto',
+  'dgram',
+  'diagnostics_channel',
+  'dns',
+  'events',
+  'fs',
+  'fs/promises',
+  'http',
+  'http2',
+  'https',
+  'module',
+  'net',
+  'os',
+  'path',
+  'perf_hooks',
+  'process',
+  'querystring',
+  'readline',
+  'stream',
+  'stream/promises',
+  'string_decoder',
+  'timers',
+  'timers/promises',
+  'tls',
+  'tty',
+  'url',
+  'util',
+  'v8',
+  'vm',
+  'worker_threads',
+  'zlib',
+]);
+
+export const builtinModules = Object.freeze([...names].flatMap((name) => [name, `node:${name}`]));
+
+export function isBuiltin(specifier: string): boolean {
+  return names.has(specifier.replace(/^node:/, ''));
+}
+
+/** Create a CommonJS loader whose resolution remains anchored to the source module. */
+export function createRequire(
+  _filename: string | URL,
+  sourceOrigin?: string,
+  unavailable: string[] = [],
+): NodeRequire {
+  const missing = new Set(unavailable);
+  const load = ((specifier: string) => {
+    const name = specifier.replace(/^node:/, '');
+    if (missing.has(specifier)) {
+      const error = new Error(`Cannot find module '${specifier}'`) as Error & { code: string };
+      error.code = 'MODULE_NOT_FOUND';
+      throw error;
+    }
+    return local[name] ?? nativeRequire(specifier, sourceOrigin);
+  }) as NodeRequire;
+  load.resolve = ((specifier: string) =>
+    nativeRequire('node:module', sourceOrigin, ['createRequire'])(
+      sourceOrigin ?? _filename,
+    ).resolve(specifier)) as NodeRequire['resolve'];
+  load.cache = Object.create(null);
+  load.extensions = Object.create(null);
+  load.main = undefined;
+  return load;
+}
+
+export class Module {}
+
+export default { Module, builtinModules, createRequire, isBuiltin };

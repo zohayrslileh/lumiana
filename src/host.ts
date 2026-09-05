@@ -47,6 +47,17 @@ export function attachHost(server: Server | Http2SecureServer, options: HostOpti
     memory: process.memoryUsage(),
     connections: sessions.size,
   });
+  const processSnapshot = () => ({
+    env: { ...process.env },
+    argv: [...process.argv],
+    execArgv: [...process.execArgv],
+    platform: process.platform,
+    arch: process.arch,
+    version: process.version,
+    versions: { ...process.versions },
+    pid: process.pid,
+    cwd: process.cwd(),
+  });
   function respond(res: ServerResponse, packet: any, sync = false): void {
     if (res.destroyed || res.writableEnded) return;
     const bytes = Buffer.from(encodePacket(packet));
@@ -203,7 +214,7 @@ export function attachHost(server: Server | Http2SecureServer, options: HostOpti
           void session.stop();
           return;
         }
-        respond(res, { id, status: status() });
+        respond(res, { id, status: status(), process: processSnapshot() });
       } else {
         const session = sessions.get(String(req.headers['x-lumiana-session']));
         if (!session || session.socket?.readyState !== WebSocket.OPEN) {

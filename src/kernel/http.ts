@@ -29,12 +29,6 @@ export class HttpKernel {
     return server;
   }
 
-  private request(handle: number): IncomingMessage {
-    const request = this.requests.get(handle);
-    if (!request) throw new ReferenceError(`Unknown HTTP request handle ${handle}`);
-    return request;
-  }
-
   private response(handle: number): ServerResponse {
     const response = this.responses.get(handle);
     if (!response) throw new ReferenceError(`Unknown HTTP response handle ${handle}`);
@@ -65,7 +59,6 @@ export class HttpKernel {
     request.on('close', () => this.event(requestHandle, 'close'));
     response.on('finish', () => this.event(responseHandle, 'finish'));
     response.on('close', () => {
-      this.responses.delete(responseHandle);
       this.event(responseHandle, 'close');
     });
     response.on('error', (error) => this.event(responseHandle, 'error', errorRecord(error)));
@@ -148,28 +141,48 @@ export class HttpKernel {
         this.server(Number(args[0])).unref();
         return undefined;
       case 'http.request.resume':
-        this.request(Number(args[0])).resume();
+        this.requests.get(Number(args[0]))?.resume();
         return undefined;
       case 'http.request.pause':
-        this.request(Number(args[0])).pause();
+        this.requests.get(Number(args[0]))?.pause();
         return undefined;
       case 'http.request.destroy':
-        this.request(Number(args[0])).destroy();
+        this.requests.get(Number(args[0]))?.destroy();
         return undefined;
       case 'http.response.write': {
         const response = this.response(Number(args[0]));
         this.state(response, args[2]);
+        if (response.write(args[1])) return true;
         return new Promise<boolean>((resolve, reject) => {
-          const writable = response.write(args[1], (error) =>
-            error ? reject(error) : resolve(true),
-          );
-          if (!writable) response.once('drain', () => resolve(false));
+          const cleanup = () => {
+            response.off('drain', drained);
+            response.off('error', failed);
+            response.off('close', closed);
+          };
+          const drained = () => {
+            cleanup();
+            resolve(false);
+          };
+          const failed = (error: Error) => {
+            cleanup();
+            reject(error);
+          };
+          const closed = () => {
+            cleanup();
+            reject(new Error('HTTP response closed before its write buffer drained'));
+          };
+          response.once('drain', drained);
+          response.once('error', failed);
+          response.once('close', closed);
         });
       }
       case 'http.response.end': {
-        const response = this.response(Number(args[0]));
+        const handle = Number(args[0]);
+        const response = this.response(handle);
         this.state(response, args[2]);
-        await new Promise<void>((resolve) => response.end(args[1], resolve));
+        if (!response.destroyed && !response.writableEnded)
+          await new Promise<void>((resolve) => response.end(args[1], resolve));
+        this.responses.delete(handle);
         return undefined;
       }
       case 'http.response.flush': {
@@ -181,9 +194,12 @@ export class HttpKernel {
       case 'http.response.trailers':
         this.response(Number(args[0])).addTrailers(args[1]);
         return undefined;
-      case 'http.response.destroy':
-        this.response(Number(args[0])).destroy();
+      case 'http.response.destroy': {
+        const handle = Number(args[0]);
+        this.responses.get(handle)?.destroy();
+        this.responses.delete(handle);
         return undefined;
+      }
       default:
         throw new TypeError(`Unknown HTTP operation ${operation}`);
     }

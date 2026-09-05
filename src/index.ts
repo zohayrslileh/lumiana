@@ -12,6 +12,7 @@ import {
   transformSource,
   directExportNames,
   nativeExportNames,
+  requiresNodeResolution,
   type Placement,
 } from './build.js';
 export interface LumianaPluginOptions {
@@ -31,7 +32,6 @@ const localBuiltins: Record<string, string> = Object.assign(Object.create(null),
   util: 'util/',
   assert: 'assert/',
   path: 'path-browserify',
-  process: 'process/browser',
   querystring: 'querystring-es3',
   stream: 'stream-browserify',
   string_decoder: 'string_decoder/',
@@ -40,16 +40,27 @@ const localBuiltins: Record<string, string> = Object.assign(Object.create(null),
 const runtimeBuiltins: Record<string, string> = Object.assign(Object.create(null), {
   'fs/promises': 'runtime/fs-promises.js',
   http: 'runtime/http.js',
+  http2: 'runtime/http2.js',
+  https: 'runtime/https.js',
+  module: 'runtime/module.js',
   net: 'runtime/net.js',
+  process: 'runtime/process.js',
+  'stream/promises': 'runtime/stream-promises.js',
+  timers: 'runtime/timers.js',
+  tls: 'runtime/tls.js',
+  crypto: 'runtime/crypto.js',
+  zlib: 'runtime/zlib.js',
 });
 const builtinName = (id: string) => id.replace(/^node:/, '');
 const exact = (id: string) => new RegExp(`^${id.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}$`);
 export function lumiana(options: LumianaPluginOptions = {}): Plugin {
   let resolveBrowser: ReturnType<ResolvedConfig['createResolver']>;
+  let resolveNode: ReturnType<ResolvedConfig['createResolver']>;
   let config: ResolvedConfig,
     bundling: Bundling,
     deploymentDir: string,
     failed = false;
+  const execution = new Map<string, Promise<boolean>>();
   let placeModule: (
     id: string,
     importer?: string,
@@ -73,6 +84,28 @@ export function lumiana(options: LumianaPluginOptions = {}): Plugin {
     id.includes('/@vite/');
   const native = (id: string) =>
     isBuiltin(id) && !localBuiltins[builtinName(id)] && !runtimeBuiltins[builtinName(id)];
+  const usesNodeEnvironment = (id?: string) => {
+    if (!id || id.startsWith('\0')) return Promise.resolve(false);
+    const file = id.split('?')[0]!;
+    const relative = path.relative(bundling.root, file);
+    const dependency =
+      relative.startsWith('..' + path.sep) || relative.split(path.sep).includes('node_modules');
+    // Application modules are composition roots: one Node import must not alter
+    // the export conditions of their unrelated package imports. A dependency's
+    // implementation, however, defines the environment for its own imports.
+    if (!dependency) return Promise.resolve(false);
+    let pending = execution.get(file);
+    if (!pending) {
+      pending = fs
+        .readFile(file, 'utf8')
+        .then(requiresNodeResolution)
+        .catch(() => false);
+      execution.set(file, pending);
+    }
+    return pending;
+  };
+  const moduleResolver = async (importer?: string) =>
+    (await usesNodeEnvironment(importer)) ? resolveNode : resolveBrowser;
   return {
     name: 'lumiana',
     enforce: 'pre',
@@ -96,14 +129,22 @@ export function lumiana(options: LumianaPluginOptions = {}): Plugin {
         requiredExports: string[] = [],
       ) => {
         if (localBuiltins[builtinName(id)] || runtimeBuiltins[builtinName(id)])
-          return { native: false };
+          return { native: false, available: true };
         let resolved: string | undefined;
         try {
           resolved = resolve
             ? await resolve(id)
             : createRequire(importer ?? path.join(root, 'package.json')).resolve(id);
         } catch {}
-        const placement = await bundling.placement(id, resolved);
+        const placement = {
+          ...(await bundling.placement(id, resolved)),
+          available: Boolean(
+            resolved &&
+            (path.isAbsolute(resolved) ||
+              resolved.startsWith('\0') ||
+              resolved.startsWith('file:')),
+          ),
+        };
         if (placement.native || !resolved || !requiredExports.length || !bare(id)) return placement;
         try {
           const parent = pathToFileURL(importer ?? path.join(root, 'package.json')).href;
@@ -136,14 +177,19 @@ export function lumiana(options: LumianaPluginOptions = {}): Plugin {
                       const local = localBuiltins[builtinName(id)];
                       if (local) return runtimeRequire.resolve(local);
                       if (id === 'lumiana/client') return { id, external: true };
+                      const resolver = await moduleResolver(importer);
                       if (
                         (
                           await placeModule(id, importer, (specifier) =>
-                            resolveBrowser(specifier, importer),
+                            resolver(specifier, importer),
                           )
                         ).native
                       )
                         return { id, external: true };
+                      if (resolver === resolveNode && bare(id)) {
+                        const resolved = await resolver(id, importer);
+                        if (resolved) return resolved;
+                      }
                     },
                     async transform(this: any, code: string, id: string) {
                       if (skip(id)) return null;
@@ -152,13 +198,12 @@ export function lumiana(options: LumianaPluginOptions = {}): Plugin {
                           placeModule(
                             specifier,
                             id,
-                            (specifier) => resolveBrowser(specifier, id),
+                            async (specifier) => (await moduleResolver(id))(specifier, id),
                             required,
                           ),
                         origin: path.relative(root, id),
                         nativeOrigin: (specifier) => bundling.origin(id, specifier),
                         nativeUsage: (id) => bundling.usage(id),
-                        nativeSegment: (id) => bundling.segment(id),
                         names: (specifier) => nativeExportNames(specifier, path.dirname(id)),
                       });
                     },
@@ -182,23 +227,19 @@ export function lumiana(options: LumianaPluginOptions = {}): Plugin {
                         if (local) return { path: runtimeRequire.resolve(local) };
                         if (args.path === 'lumiana/client')
                           return { path: args.path, external: true };
+                        const resolver = await moduleResolver(args.importer || undefined);
                         if (
                           (
-                            await placeModule(
-                              args.path,
-                              args.importer || undefined,
-                              async (specifier) =>
-                                (
-                                  await build.resolve(specifier, {
-                                    kind: args.kind,
-                                    resolveDir: args.resolveDir,
-                                    pluginData: { lumianaProbe: true },
-                                  })
-                                ).path,
+                            await placeModule(args.path, args.importer || undefined, (specifier) =>
+                              resolver(specifier, args.importer || undefined),
                             )
                           ).native
                         )
                           return { path: args.path, external: true };
+                        if (resolver === resolveNode && bare(args.path)) {
+                          const resolved = await resolver(args.path, args.importer || undefined);
+                          if (resolved) return { path: resolved };
+                        }
                       });
                       build.onLoad({ filter: /\.[cm]?[jt]sx?$/ }, async (args) => {
                         if (skip(args.path)) return;
@@ -209,19 +250,12 @@ export function lumiana(options: LumianaPluginOptions = {}): Plugin {
                               specifier,
                               args.path,
                               async (specifier) =>
-                                (
-                                  await build.resolve(specifier, {
-                                    kind: 'import-statement',
-                                    resolveDir: path.dirname(args.path),
-                                    pluginData: { lumianaProbe: true },
-                                  })
-                                ).path,
+                                (await moduleResolver(args.path))(specifier, args.path),
                               required,
                             ),
                           origin: path.relative(root, args.path),
                           nativeOrigin: (specifier) => bundling.origin(args.path, specifier),
                           nativeUsage: (id) => bundling.usage(id),
-                          nativeSegment: (id) => bundling.segment(id),
                           names: (id) => nativeExportNames(id, path.dirname(args.path)),
                         });
                         if (!transformed) return;
@@ -262,6 +296,11 @@ export function lumiana(options: LumianaPluginOptions = {}): Plugin {
         if (!config.server.fs.allow.includes(file)) config.server.fs.allow.push(file);
       }
       resolveBrowser = config.createResolver({ scan: true });
+      resolveNode = config.createResolver({
+        scan: true,
+        mainFields: ['module', 'jsnext:main', 'jsnext'],
+        conditions: ['module', 'node', 'development|production'],
+      });
     },
     async resolveId(id, importer, resolveOptions) {
       if (id === 'lumiana/client') return clientId;
@@ -276,6 +315,10 @@ export function lumiana(options: LumianaPluginOptions = {}): Plugin {
         // requests without turning a built-in import into package exclusion.
         return { id, external: true };
       }
+      if (importer && bare(id) && (await usesNodeEnvironment(importer))) {
+        const resolved = await resolveNode(id, importer);
+        if (resolved) return resolved;
+      }
     },
     load(id) {
       if (id === clientId) {
@@ -289,10 +332,14 @@ export function lumiana(options: LumianaPluginOptions = {}): Plugin {
         origin: path.relative(config.root, id.split('?')[0]!),
         nativeOrigin: (specifier) => bundling.origin(id.split('?')[0]!, specifier),
         nativeUsage: (id) => bundling.usage(id),
-        nativeSegment: (id) => bundling.segment(id),
         names: (specifier) => nativeExportNames(specifier, path.dirname(id)),
         place: (specifier, required) =>
-          placeModule(specifier, id, (specifier) => resolveBrowser(specifier, id), required),
+          placeModule(
+            specifier,
+            id,
+            async (specifier) => (await moduleResolver(id))(specifier, id),
+            required,
+          ),
       });
     },
     configureServer(server) {

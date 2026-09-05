@@ -2,6 +2,12 @@ import { Buffer } from 'buffer';
 import { References } from './references.js';
 import { evaluateExpression } from './references.js';
 import { dispatchKernel, installKernel, removeKernel } from './runtime/bridge.js';
+import processRuntime, { initializeProcess } from './runtime/process.js';
+import {
+  clearImmediate as localClearImmediate,
+  setImmediate as localSetImmediate,
+} from './runtime/timers.js';
+import { readPath } from './access.js';
 import {
   PREFIX,
   encodePacket,
@@ -275,8 +281,12 @@ export const connect = {
             const packet = decodePacket(new Uint8Array(event.data));
             if (packet.type === 'ready') {
               state.connection = c;
-              installKernel(c, (operation, ...args) =>
-                c.refs.invokeAsync('kernel', operation, ...args),
+              initializeProcess(initial.process);
+              installKernel(
+                c,
+                (operation, ...args) => c.refs.invokeAsync('kernel', operation, ...args),
+                (specifier, origin, path = []) =>
+                  c.refs.invokePath('module', [specifier, undefined, origin], path),
               );
               resolve();
               return;
@@ -466,4 +476,22 @@ export const HybridWebSocket: typeof WebSocket = new Proxy(function () {}.bind(n
   get(_target, key) {
     return Reflect.get(state.WebSocket, key);
   },
+});
+
+// CommonJS cannot contain ESM imports. The Vite transform reads these internal
+// capabilities from the browser context after the client bootstrap has loaded.
+Object.assign((global[Symbol.for('lumiana.runtime')] ??= Object.create(null)), {
+  Buffer,
+  HybridWebSocket,
+  clearImmediate: localClearImmediate,
+  evaluateIntrinsic,
+  hybridFetch,
+  importNode,
+  invokeMember,
+  nativeBindings,
+  nativeGlobal,
+  nativeModule,
+  process: processRuntime,
+  readPath,
+  setImmediate: localSetImmediate,
 });

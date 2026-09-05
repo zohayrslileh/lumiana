@@ -143,13 +143,13 @@ export class NetworkKernel {
         this.socket(Number(args[0])).end(args[1]);
         return undefined;
       case 'net.destroy':
-        this.socket(Number(args[0])).destroy();
+        this.sockets.get(Number(args[0]))?.destroy();
         return undefined;
       case 'net.pause':
-        this.socket(Number(args[0])).pause();
+        this.sockets.get(Number(args[0]))?.pause();
         return undefined;
       case 'net.resume':
-        this.socket(Number(args[0])).resume();
+        this.sockets.get(Number(args[0]))?.resume();
         return undefined;
       case 'net.setNoDelay':
         this.socket(Number(args[0])).setNoDelay(args[1]);
