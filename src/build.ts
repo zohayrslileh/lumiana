@@ -9,9 +9,76 @@ import { init as initESM, parse as parseESM } from 'es-module-lexer';
 import { resolve as resolveImport } from 'import-meta-resolve';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import MagicString from 'magic-string';
+import type { NativeExpression } from './protocol.js';
 export interface Placement {
   native: boolean;
   reason?: string;
+  nativeExports?: string[];
+}
+const portableBuiltins = new Set(['buffer', 'node:buffer', 'events', 'node:events']);
+const nativeGlobals = new Set(['process', 'global', 'setImmediate', 'clearImmediate']);
+
+/** Find exports whose implementation transitively depends on a native capability. */
+function nativeCapabilityExports(source: string): string[] {
+  const ast = parseCode(source);
+  let program: any;
+  traverse(ast as any, {
+    Program(path: any) {
+      program = path;
+    },
+  });
+  const exports = new Map<string, string>();
+  for (const node of ast.program.body as any[]) {
+    if (node.type === 'ExportNamedDeclaration') {
+      if (node.declaration?.id?.name)
+        exports.set(node.declaration.id.name, node.declaration.id.name);
+      for (const declaration of node.declaration?.declarations ?? [])
+        if (declaration.id.type === 'Identifier')
+          exports.set(declaration.id.name, declaration.id.name);
+      if (!node.source)
+        for (const specifier of node.specifiers)
+          if (specifier.local?.name)
+            exports.set(specifier.exported.name ?? specifier.exported.value, specifier.local.name);
+    } else if (node.type === 'ExportDefaultDeclaration' && node.declaration?.id?.name) {
+      exports.set('default', node.declaration.id.name);
+    }
+  }
+  const memo = new Map<any, boolean>(),
+    visiting = new Set<any>();
+  const depends = (binding: any): boolean => {
+    if (!binding) return false;
+    if (memo.has(binding)) return memo.get(binding)!;
+    if (visiting.has(binding)) return false;
+    visiting.add(binding);
+    const declaration = binding.path.parentPath;
+    if (declaration?.isImportDeclaration()) {
+      const source = declaration.node.source.value;
+      const result = isBuiltin(source) && !portableBuiltins.has(source);
+      visiting.delete(binding);
+      memo.set(binding, result);
+      return result;
+    }
+    let result = false;
+    binding.path.traverse({
+      ReferencedIdentifier(path: any) {
+        if (result) return;
+        const dependency = path.scope.getBinding(path.node.name);
+        if (!dependency) result = nativeGlobals.has(path.node.name);
+        else if (dependency !== binding) result = depends(dependency);
+      },
+    });
+    visiting.delete(binding);
+    memo.set(binding, result);
+    return result;
+  };
+  return [...exports]
+    .filter(([, local]) => {
+      const binding = program.scope.getBinding(local);
+      // A direct re-export is already a native reference after normal bundling.
+      // Moving its package would add no execution locality.
+      return binding && !binding.path.isImportSpecifier() && depends(binding);
+    })
+    .map(([name]) => name);
 }
 const parseCode = (source: string) =>
   parse(source, {
@@ -49,6 +116,9 @@ export class Bundling {
     if (id === undefined) this.dynamic = true;
     else if (bare(id) && !isBuiltin(id))
       this.external.set(packageName(id), 'Native handler requested through node()');
+  }
+  segment(id: string): void {
+    if (!isBuiltin(id)) this.external.set(packageName(id), 'Native-dependent export');
   }
   constructor(
     readonly root: string,
@@ -139,7 +209,13 @@ export class Bundling {
           },
         ],
       });
-      return reason ? { native: true, reason } : { native: false };
+      if (reason) return { native: true, reason };
+      let nativeExports: string[] = [];
+      if (/\.[cm]?[jt]sx?$/.test(file))
+        try {
+          nativeExports = nativeCapabilityExports(await fs.readFile(file, 'utf8'));
+        } catch {}
+      return { native: false, nativeExports };
     } catch (error: any) {
       return { native: true, reason: error.errors?.[0]?.text ?? error.message };
     }
@@ -175,9 +251,31 @@ export interface TransformOptions {
   client?: string;
   access?: string;
   nativeUsage?(id?: string): void;
+  nativeSegment?(id: string): void;
   origin?: string;
   nativeOrigin?(specifier: string): void;
   names?(id: string): Promise<string[]>;
+}
+const portableIntrinsics = new Set(['JSON', 'Math', 'Object', 'Reflect']);
+function nativeExpression(
+  node: any,
+  scope: any,
+): { expression: NativeExpression; native: boolean } | undefined {
+  if (node.type === 'NullLiteral')
+    return { expression: { kind: 'literal', value: null }, native: false };
+  if (['BooleanLiteral', 'NumericLiteral', 'StringLiteral'].includes(node.type))
+    return { expression: { kind: 'literal', value: node.value }, native: false };
+  if (node.type === 'Identifier' && nativeGlobals.has(node.name) && !scope.getBinding(node.name))
+    return { expression: { kind: 'global', name: node.name }, native: true };
+  if (node.type === 'MemberExpression') {
+    const key = staticKey(node),
+      object = key === undefined ? undefined : nativeExpression(node.object, scope);
+    if (object)
+      return {
+        expression: { kind: 'get', object: object.expression, key: key! },
+        native: object.native,
+      };
+  }
 }
 function staticKey(node: any): string | undefined {
   if (node.type !== 'MemberExpression') return;
@@ -249,7 +347,8 @@ export async function transformSource(source: string, id: string, options: Trans
     imports: string[] = [];
   const moduleNodes: any[] = [],
     globals: any[] = [],
-    members: any[] = [];
+    members: any[] = [],
+    calls: any[] = [];
   let counter = 0;
   const reserved = new Set<string>();
   traverse(ast as any, {
@@ -270,7 +369,8 @@ export async function transformSource(source: string, id: string, options: Trans
     fetchName = name(),
     socketName = name(),
     bufferName = name(),
-    readName = name();
+    readName = name(),
+    evaluateName = name();
   const used = new Set<string>();
   const esm = ast.program.body.some(
     (node) => node.type.startsWith('Import') || node.type.startsWith('Export'),
@@ -292,6 +392,7 @@ export async function transformSource(source: string, id: string, options: Trans
       if (p.node.source && p.node.exportKind !== 'type') moduleNodes.push(p);
     },
     CallExpression(p: any) {
+      calls.push(p);
       if (p.node.callee.type !== 'Identifier') return;
       const binding = p.scope.getBinding(p.node.callee.name);
       if (
@@ -339,6 +440,52 @@ export async function transformSource(source: string, id: string, options: Trans
     const n = p.node,
       specifier = n.source?.value ?? n.arguments?.[0]?.value;
     const placement = await options.place(specifier);
+    if (!placement.native && n.type === 'ImportDeclaration' && placement.nativeExports?.length) {
+      const nativeExports = new Set(placement.nativeExports);
+      const selected = n.specifiers.filter((specifier: any) => {
+        if (specifier.type === 'ImportDefaultSpecifier') return nativeExports.has('default');
+        if (specifier.type !== 'ImportSpecifier') return false;
+        return nativeExports.has(specifier.imported.name ?? specifier.imported.value);
+      });
+      if (selected.length) {
+        options.nativeSegment?.(specifier);
+        used.add('nativeModule');
+        const remaining = n.specifiers.filter((item: any) => !selected.includes(item));
+        const imported = remaining.filter((item: any) => item.type === 'ImportSpecifier');
+        const localImport = remaining.length
+          ? `import ${[
+              ...remaining
+                .filter((item: any) => item.type === 'ImportDefaultSpecifier')
+                .map((item: any) => item.local.name),
+              ...remaining
+                .filter((item: any) => item.type === 'ImportNamespaceSpecifier')
+                .map((item: any) => `* as ${item.local.name}`),
+              ...(imported.length
+                ? [
+                    `{${imported
+                      .map((item: any) => {
+                        const name = item.imported.name ?? item.imported.value;
+                        return name === item.local.name ? name : `${name} as ${item.local.name}`;
+                      })
+                      .join(',')}}`,
+                  ]
+                : []),
+            ].join(',')} from ${JSON.stringify(specifier)};`
+          : '';
+        const declarations = selected
+          .map((item: any) => {
+            const exported =
+              item.type === 'ImportDefaultSpecifier'
+                ? 'default'
+                : (item.imported.name ?? item.imported.value);
+            return `const ${item.local.name}=${nodeName}(${JSON.stringify(specifier)},"namespace",${JSON.stringify(options.origin ?? null)},${JSON.stringify([exported])});`;
+          })
+          .join('');
+        edits.overwrite(n.start, n.end, localImport + declarations);
+        removed.push([n.start, n.end]);
+      }
+      continue;
+    }
     if (!placement.native) continue;
     options.nativeOrigin?.(specifier);
     used.add('nativeModule');
@@ -385,6 +532,43 @@ export async function transformSource(source: string, id: string, options: Trans
       continue;
     }
     edits.overwrite(n.start, n.end, replacement);
+    removed.push([n.start, n.end]);
+  }
+  for (const p of calls) {
+    const n = p.node;
+    if (removed.some(([start, end]) => n.start >= start && n.end <= end)) continue;
+    if (n.optional || n.callee.type !== 'MemberExpression' || n.callee.optional) continue;
+    const key = staticKey(n.callee);
+    if (
+      key === undefined ||
+      n.callee.object.type !== 'Identifier' ||
+      !portableIntrinsics.has(n.callee.object.name) ||
+      p.scope.getBinding(n.callee.object.name)
+    )
+      continue;
+    const arguments_ = n.arguments.map((argument: any) =>
+      argument.type === 'SpreadElement' ? undefined : nativeExpression(argument, p.scope),
+    );
+    if (
+      arguments_.some((argument: any) => !argument) ||
+      !arguments_.some((argument: any) => argument.native)
+    )
+      continue;
+    used.add('evaluateIntrinsic');
+    const path = [n.callee.object.name, key];
+    const expression: NativeExpression = {
+      kind: 'call',
+      object: { kind: 'global', name: path[0]! },
+      key,
+      arguments: Object.fromEntries(
+        arguments_.map((argument: any, index: number) => [index, argument.expression]),
+      ),
+    };
+    edits.overwrite(
+      n.start,
+      n.end,
+      `${evaluateName}(${edits.slice(n.callee.object.start, n.callee.object.end)},${edits.slice(n.callee.start, n.callee.end)},${JSON.stringify(path)},${JSON.stringify(expression)})`,
+    );
     removed.push([n.start, n.end]);
   }
   for (const p of globals) {
@@ -442,6 +626,7 @@ export async function transformSource(source: string, id: string, options: Trans
     hybridFetch: fetchName,
     HybridWebSocket: socketName,
     Buffer: bufferName,
+    evaluateIntrinsic: evaluateName,
   };
   if (used.delete('readPath')) {
     const access = JSON.stringify(options.access ?? 'lumiana/internal');

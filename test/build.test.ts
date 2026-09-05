@@ -40,6 +40,13 @@ test('read-chain transforms preserve calls, writes, optional access and computed
     place: async () => ({ native: true }),
   });
   assert.match(global!.code, /\("process","env","HOME"\)/);
+  const intrinsic = await transformSource(
+    'export const value = JSON.stringify(process.env);',
+    'entry.js',
+    { place: async () => ({ native: false }) },
+  );
+  assert.match(intrinsic!.code, /evaluateIntrinsic as/);
+  assert.match(intrinsic!.code, /"kind":"call"/);
   const module = await transformSource(
     "export const x = require('any-package').branch.value;",
     'entry.js',
@@ -93,19 +100,37 @@ test('bundling is the default; Node built-ins are not grounds for excluding a pa
   try {
     const good = path.join(temp, 'good.js'),
       native = path.join(temp, 'native.cjs'),
-      dynamic = path.join(temp, 'dynamic.cjs');
+      dynamic = path.join(temp, 'dynamic.cjs'),
+      data = path.join(temp, 'data.json');
     await fs.writeFile(
       good,
-      "import {readFileSync} from 'node:fs';export const read=readFileSync;export const add=(a,b)=>a+b;",
+      "import {readFileSync} from 'node:fs';export const read=(file)=>readFileSync(file);export const add=(a,b)=>a+b;",
     );
     await fs.writeFile(native, "module.exports=require('./binding.node');");
     await fs.writeFile(path.join(temp, 'binding.node'), 'binary fixture');
     await fs.writeFile(dynamic, 'module.exports=name=>require(name);');
+    await fs.writeFile(data, '{"value":42}');
     const placement = new Bundling(temp, ['explicit']);
-    assert.equal((await placement.placement('good', good)).native, false);
+    const goodPlacement = await placement.placement('good', good);
+    assert.equal(goodPlacement.native, false);
+    assert.deepEqual(goodPlacement.nativeExports, ['read']);
     assert.equal((await placement.placement('native', native)).native, true);
     assert.match((await placement.placement('dynamic', dynamic)).reason!, /Dynamic require/);
+    assert.equal((await placement.placement('data', data)).native, false);
     assert.equal((await placement.placement('explicit', good)).native, true);
+
+    let segmented = '';
+    const transformed = await transformSource(
+      "import {read,add} from 'good';export const values=[read,add(1,2)];",
+      'entry.js',
+      {
+        place: async () => goodPlacement,
+        nativeSegment: (id) => (segmented = id),
+      },
+    );
+    assert.equal(segmented, 'good');
+    assert.match(transformed!.code, /import \{add\} from "good"/);
+    assert.match(transformed!.code, /\("good","namespace",null,\["read"\]\)/);
   } finally {
     await fs.rm(temp, { recursive: true, force: true });
   }

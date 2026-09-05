@@ -1,4 +1,5 @@
 import type { Plugin, ResolvedConfig, UserConfig } from 'vite';
+import { normalizePath } from 'vite';
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -93,6 +94,7 @@ export function lumiana(options: LumianaPluginOptions = {}): Plugin {
                         origin: path.relative(root, id),
                         nativeOrigin: (specifier) => bundling.origin(id, specifier),
                         nativeUsage: (id) => bundling.usage(id),
+                        nativeSegment: (id) => bundling.segment(id),
                         names: (specifier) => nativeExportNames(specifier, path.dirname(id)),
                       });
                     },
@@ -152,6 +154,7 @@ export function lumiana(options: LumianaPluginOptions = {}): Plugin {
                           origin: path.relative(root, args.path),
                           nativeOrigin: (specifier) => bundling.origin(args.path, specifier),
                           nativeUsage: (id) => bundling.usage(id),
+                          nativeSegment: (id) => bundling.segment(id),
                           names: (id) => nativeExportNames(id, path.dirname(args.path)),
                         });
                         if (!transformed) return;
@@ -184,6 +187,12 @@ export function lumiana(options: LumianaPluginOptions = {}): Plugin {
     },
     configResolved(resolved) {
       config = resolved;
+      // Linked installs may put browser runtime entries outside the Vite root.
+      // Extend resolved rules so workspace detection and explicit user paths survive.
+      for (const name of ['client.js', 'access.js']) {
+        const file = normalizePath(path.join(runtimeDir, name));
+        if (!config.server.fs.allow.includes(file)) config.server.fs.allow.push(file);
+      }
       resolveBrowser = config.createResolver({ scan: true });
     },
     async resolveId(id, importer, resolveOptions) {
@@ -210,6 +219,7 @@ export function lumiana(options: LumianaPluginOptions = {}): Plugin {
         origin: path.relative(config.root, id.split('?')[0]!),
         nativeOrigin: (specifier) => bundling.origin(id.split('?')[0]!, specifier),
         nativeUsage: (id) => bundling.usage(id),
+        nativeSegment: (id) => bundling.segment(id),
         names: (specifier) => nativeExportNames(specifier, path.dirname(id)),
         place: async (specifier) => {
           if (localBuiltins[specifier.replace(/^node:/, '')]) return { native: false };

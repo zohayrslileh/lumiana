@@ -3,7 +3,7 @@ import { createRequire } from 'node:module';
 import path from 'node:path';
 import { pathToFileURL, fileURLToPath } from 'node:url';
 import { resolve as resolveImport } from 'import-meta-resolve';
-import { References } from './references.js';
+import { evaluateExpression, References } from './references.js';
 import { failure, restoreException, type Invocation, type Graph } from './protocol.js';
 if (!parentPort) throw new Error('Lumiana requires a worker thread');
 const port = parentPort;
@@ -56,6 +56,8 @@ const refs = new References({
       return loaded;
     }
     if (operation === 'global') return (globalThis as any)[args[0]];
+    if (operation === 'evaluate')
+      return evaluateExpression(args[0], (name) => (globalThis as any)[name]);
     throw new TypeError(`Unknown operation ${operation}`);
   },
 });

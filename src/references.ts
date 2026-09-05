@@ -1,10 +1,34 @@
-import type { Graph, Invocation, Reference } from './protocol.js';
+import type { Graph, Invocation, NativeExpression, Reference } from './protocol.js';
 import { decodeValue, encodeValue, type ValueReferences } from './values.js';
 import { readPath, registerReader } from './access.js';
 export interface ReferenceTransport {
   sync(invocation: Invocation): Graph;
   async(invocation: Invocation): Promise<Graph>;
   special?(operation: string, args: any[]): any;
+}
+export function evaluateExpression(
+  expression: NativeExpression,
+  global: (name: string) => any,
+): any {
+  switch (expression.kind) {
+    case 'literal':
+      return expression.value;
+    case 'global':
+      return global(expression.name);
+    case 'get': {
+      const object = evaluateExpression(expression.object, global);
+      return Reflect.get(object, expression.key, object);
+    }
+    case 'call': {
+      const receiver = evaluateExpression(expression.object, global);
+      const fn = Reflect.get(receiver, expression.key, receiver);
+      return Reflect.apply(
+        fn,
+        receiver,
+        Object.values(expression.arguments).map((argument) => evaluateExpression(argument, global)),
+      );
+    }
+  }
 }
 /** Both endpoints implement the same ownership and reflection contract. */
 export class References implements ValueReferences {

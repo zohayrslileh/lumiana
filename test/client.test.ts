@@ -79,6 +79,27 @@ test('client contract through real HTTP, binary WebSocket and an isolated native
     assert.equal(await connect.credentials(creds), lumiana);
     await assert.rejects(connect.credentials({ ...creds, password: 'different' }), /different/);
     assert.equal((await lumiana.status()).pid, pid);
+    node('node:process').env.LUMIANA_STRINGIFY_TEST = 'stringify-ok';
+    const beforeStringify = XMLHttpRequest.requests;
+    const serialized = await compile(
+      'export const value = JSON.parse(JSON.stringify(process.env)).LUMIANA_STRINGIFY_TEST;',
+    );
+    assert.equal(serialized.value, 'stringify-ok');
+    assert.equal(
+      XMLHttpRequest.requests - beforeStringify,
+      1,
+      'portable intrinsic and native argument execute as one operation',
+    );
+    const customized = await compile('export const read = () => JSON.stringify(process.env);');
+    const originalStringify = JSON.stringify;
+    try {
+      JSON.stringify = function () {
+        return this === JSON ? 'custom stringify' : 'wrong receiver';
+      } as typeof JSON.stringify;
+      assert.equal(customized.read() === 'custom stringify', true);
+    } finally {
+      JSON.stringify = originalStringify;
+    }
     const beforeHome = XMLHttpRequest.requests;
     assert.equal((await compile('export const value = process.env.HOME;')).value, process.env.HOME);
     assert.equal(XMLHttpRequest.requests - beforeHome, 1, 'global property chain takes one XHR');
@@ -201,6 +222,27 @@ test('client contract through real HTTP, binary WebSocket and an isolated native
       });
     });
     assert.deepEqual(chunks, ['hello']);
+    const { Hono } = await import('../example/node_modules/hono/dist/index.js');
+    const app = new Hono().get('/', (context: any) => context.text('Hello from Hono'));
+    const beforeServe = XMLHttpRequest.requests;
+    const serve = nativeModule('@hono/node-server', 'namespace', 'example/src/entry.ts', ['serve']);
+    let server: any;
+    const listening = new Promise<number>((resolve) => {
+      server = serve({ fetch: app.fetch, port: 0 }, (info: { port: number }) => resolve(info.port));
+    });
+    assert.equal(
+      XMLHttpRequest.requests - beforeServe,
+      2,
+      'native-dependent export loads and starts in two operations',
+    );
+    const honoPort = await listening;
+    assert.equal(
+      await (await originalFetch(`http://127.0.0.1:${honoPort}/`)).text(),
+      'Hello from Hono',
+    );
+    await new Promise<void>((resolve, reject) =>
+      server.close((error?: Error) => (error ? reject(error) : resolve())),
+    );
     const pending = Promise.resolve(runtime.forever());
     await new Promise((resolve) => setTimeout(resolve, 10));
     lumiana.disconnect();

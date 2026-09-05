@@ -35,6 +35,19 @@ test`), with separate text `bun.lock` files for root, example, and playground.
 - Static property chains now share one invocation while their intermediate
   values remain native references. `process.env.HOME` uses one XHR. This is a
   general compiler/reference optimization, not a module or property allowlist.
+- Portable intrinsic expressions use copied operation graphs. The owner executes
+  the graph atomically when the browser intrinsic retains its captured identity;
+  replacement functions fall back to normal reference semantics with the correct
+  receiver. `JSON.stringify(process.env)` now takes one synchronous request and
+  does not cache or snapshot the environment.
+- Static named ESM exports with local implementations are analyzed through their
+  lexical binding dependencies. Implementations that transitively require native
+  capabilities can execute in the Worker while independent packages remain
+  bundled. Direct built-in re-exports do not move their package. In the example,
+  Hono stays browser-side and `@hono/node-server`'s `serve` export runs natively;
+  loading and starting it takes two synchronous requests. The deployment manifest
+  includes `@hono/node-server` automatically, and an end-to-end HTTP test reaches
+  the browser Hono handler.
 - `Invocation.path` carries reads; `Graph.path` resumes any remaining reads at
   the caller when values copy or references return home. Preserve snapshot,
   getter, error, receiver, assignment, and computed-key behavior. Do not cache
@@ -43,7 +56,15 @@ test`), with separate text `bun.lock` files for root, example, and playground.
   ownership registry. It has no connection dependency, so local reads work before
   connection and bundled CommonJS libraries retain their original module format.
   The compiler still preserves ordinary public imports.
-- Chain optimization validation: all ten automated tests and type checking pass;
+- Linked installations can place `access.js` and `client.js` outside Vite's root.
+  The plugin adds these exact browser entries to the resolved `server.fs.allow`
+  list, preserving detected workspace paths and explicit configuration. Optimized
+  dependencies may request them before application import analysis grants access.
+  Regression coverage checks both allow-list modes, dependent browser assets, and
+  continued rejection of server runtime files. `JSON.stringify(process.env)` also
+  passes through the real HTTP client test. All eleven tests and type checking
+  pass; the linked Vite 8 example returns HTTP 200 for `access.js`.
+- Chain and execution-placement validation: all eleven automated tests and type checking pass;
   Vite 6 and 8 example builds pass. Request-count tests use real HTTP through an
   XHR test shim and separate Workers. Additional checks cover local reads before connection,
   separately bundled readers, CommonJS strict mode, Vite metadata, and execution

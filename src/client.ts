@@ -1,5 +1,6 @@
 import { Buffer } from 'buffer';
 import { References } from './references.js';
+import { evaluateExpression } from './references.js';
 import {
   PREFIX,
   encodePacket,
@@ -9,6 +10,7 @@ import {
   restoreException,
   type Graph,
   type Invocation,
+  type NativeExpression,
 } from './protocol.js';
 export { Buffer } from 'buffer';
 export interface Credentials {
@@ -349,6 +351,32 @@ export function importNode(specifier: string, origin?: string): Promise<any> {
 /** @internal Scope-aware transforms call this without replacing browser globals. */
 export function nativeGlobal(name: string, ...path: string[]): any {
   return connection().refs.invokePath('global', [name], path);
+}
+const intrinsicRoots: Record<string, any> = Object.create(null);
+const intrinsicFunctions: Record<string, Function> = Object.create(null);
+for (const name of ['JSON', 'Math', 'Object', 'Reflect'])
+  intrinsicRoots[name] = (globalThis as any)[name];
+for (const [name, root] of Object.entries(intrinsicRoots))
+  for (const key of Object.getOwnPropertyNames(root)) {
+    const value = Object.getOwnPropertyDescriptor(root, key)?.value;
+    if (typeof value === 'function') intrinsicFunctions[`${name}.${key}`] = value;
+  }
+/** @internal Execute a portable intrinsic expression beside its native-owned values. */
+export function evaluateIntrinsic<T>(
+  receiver: unknown,
+  current: Function,
+  path: string[],
+  expression: NativeExpression,
+): T {
+  const intrinsic = intrinsicFunctions[path.join('.')];
+  if (current === intrinsic) return connection().refs.invoke('evaluate', expression) as T;
+  if (expression.kind !== 'call') throw new TypeError('Invalid intrinsic expression');
+  const resolve = (name: string) => (name === path[0] ? intrinsicRoots[name] : nativeGlobal(name));
+  return Reflect.apply(
+    current,
+    receiver,
+    Object.values(expression.arguments).map((argument) => evaluateExpression(argument, resolve)),
+  ) as T;
 }
 /** @internal Hybrid invocation emitted for unbound fetch. */
 export function hybridFetch(input: RequestInfo | URL, init?: RequestInit): Promise<Response> {

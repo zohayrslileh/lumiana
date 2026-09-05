@@ -96,6 +96,8 @@ Synchronous operations use synchronous XHR. The request is MessagePack binary; t
 
 Consecutive property reads are combined when they can execute on the same owner. For example, `process.env.HOME` takes one synchronous request. This also applies to other globals, module references, and references passed into ordinary functions. Reads remain live; values are not cached. Evaluation continues locally at copied values, and computed expressions, method receivers, and assignment targets keep their original evaluation order.
 
+Portable intrinsic expressions are combined as well. `JSON.stringify(process.env)` executes the complete expression beside `process.env` and returns its string in one synchronous request. If application code replaces the intrinsic, Lumiana preserves that replacement and uses ordinary reference behavior. Native-dependent exported implementations can execute beside their Node capabilities instead of reflecting through every intermediate object. This is determined from lexical capability dependencies, not package names; direct built-in re-exports and pure exports continue through the browser bundle.
+
 Each connection owns one Worker. Closing the connection stops the Worker; Worker exit or failure closes the connection and rejects pending work. Credentials are checked at initial establishment. Subsequent messages route to that connection's Worker without module allowlists or per-operation permission checks. Worker console output, standard output/error, and uncaught errors are projected into the browser.
 
 Run `vite build` followed by `vite preview` to try the built application locally, including its native Node.js handlers. Preview uses the plugin's credentials and respects Vite's base path and preview options.

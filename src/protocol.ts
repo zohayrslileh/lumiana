@@ -28,6 +28,16 @@ export interface Invocation {
   args: Graph[];
   path?: string[];
 }
+export type NativeExpression =
+  | { kind: 'literal'; value: null | boolean | number | string }
+  | { kind: 'global'; name: string }
+  | { kind: 'get'; object: NativeExpression; key: string }
+  | {
+      kind: 'call';
+      object: NativeExpression;
+      key: string;
+      arguments: Record<string, NativeExpression>;
+    };
 export interface Failure {
   name: string;
   message: string;
