@@ -1,6 +1,6 @@
 {
   "name": "lumiana",
-  "version": "0.2.2",
+  "version": "0.3.0",
   "description": "Native Node.js handler references for Vite",
   "type": "module",
   "main": "./dist/index.js",
