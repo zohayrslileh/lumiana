@@ -47,7 +47,7 @@ test('Vite builds browser packages and deploys only proven or explicit native de
     );
     await fs.writeFile(
       path.join(root, 'main.js'),
-      "import {connect} from 'lumiana/client';await connect.credentials({username:'lumiana',password:'lumiana'});await import('./entry.js');",
+      "import {connect} from 'lumiana/client';await connect.credentials({username:'build-user',password:'build-password'});await import('./entry.js');",
     );
     await fs.writeFile(
       path.join(root, 'entry.js'),
@@ -57,7 +57,12 @@ test('Vite builds browser packages and deploys only proven or explicit native de
       root,
       configFile: false,
       logLevel: 'silent',
-      plugins: [lumiana({ nodeModules: ['explicit'] })],
+      plugins: [
+        lumiana({
+          defaultCredentials: { username: 'build-user', password: 'build-password' },
+          nodeModules: ['explicit'],
+        }),
+      ],
       build: { minify: false, target: 'esnext' },
     });
     const assets = path.join(root, 'dist/public/assets');
@@ -76,6 +81,9 @@ test('Vite builds browser packages and deploys only proven or explicit native de
     assert.equal(manifest.dependencies.portable, undefined);
     assert.equal(manifest.dependencies.conditional, undefined);
     assert.ok((await fs.stat(path.join(root, 'dist/server/worker.js'))).size > 0);
+    const main = await fs.readFile(path.join(root, 'dist/main.mjs'), 'utf8');
+    assert.ok(main.includes('username: process.env.LUMIANA_USERNAME ?? "build-user"'));
+    assert.ok(main.includes('password: process.env.LUMIANA_PASSWORD ?? "build-password"'));
   } finally {
     await fs.rm(root, { recursive: true, force: true });
   }

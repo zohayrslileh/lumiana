@@ -6,7 +6,7 @@
   "scripts": {
     "dev": "vite",
     "build": "tsc && vite build",
-    "preview": "node dist/main.mjs"
+    "preview": "vite preview"
   },
   "devDependencies": {
     "@types/express": "^5.0.6",

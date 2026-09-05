@@ -14,9 +14,9 @@ export default defineConfig({
 
 ```ts
 // main.ts
-import { connect, lumiana } from 'lumiana/client';
+import { connect } from 'lumiana/client';
 
-await connect.credentials({
+const lumiana = await connect.credentials({
   username: 'lumiana',
   password: 'lumiana',
 });
@@ -27,12 +27,14 @@ console.log(await lumiana.status());
 
 ```ts
 // app.ts — an ordinary application module
-import { readFileSync } from 'node:fs';
 import { hostname } from 'node:os';
 
-const content = readFileSync('/tmp/message.txt', 'utf8');
-document.body.textContent = `${hostname()}: ${content}`;
+document.body.textContent = `Connected to ${hostname()}`;
 ```
+
+`hostname()` runs on the server and returns a string synchronously. The DOM update runs in the browser.
+
+The bootstrap uses the instance returned by `connect.credentials()`. Inside the hybrid application, modules can import `{ lumiana }` from `'lumiana/client'` to access that same instance.
 
 ES module imports execute before the importing module's body. Initialize the connection before loading code that interacts with native handlers. The dynamic import above establishes that order; no special file suffix or source directory is required. Top-level `await` requires a compatible Vite build target, or it can be placed inside an async bootstrap function.
 
@@ -47,18 +49,22 @@ The browser API is small:
 | `node(specifier)`                                         | Resolves a native module through the connected Worker's Node resolver. Callable from any application module; throws before connection.                  |
 
 ```ts
+// Inside the connected hybrid application
 import { node } from 'lumiana/client';
+import { tmpdir } from 'node:os';
 
 const fs = node<typeof import('node:fs')>('node:fs');
-const exists = fs.existsSync('/tmp/message.txt'); // boolean, synchronously
+const exists = fs.existsSync(tmpdir()); // boolean, synchronously
 ```
 
-`url` selects the host's HTTP(S) origin; otherwise the page's origin is used. The plugin respects Vite's base path. Credentials default to `lumiana` / `lumiana` and can be set through plugin options or `LUMIANA_USERNAME` / `LUMIANA_PASSWORD`.
+`url` selects the host's HTTP(S) origin; otherwise the page's origin is used. The plugin respects Vite's base path. Credentials default to `lumiana` / `lumiana` and can be set through the plugin's `defaultCredentials` option or `LUMIANA_USERNAME` / `LUMIANA_PASSWORD`.
 
 ```ts
 lumiana({
-  username: 'my-user',
-  password: 'my-password',
+  defaultCredentials: {
+    username: 'my-user',
+    password: 'my-password',
+  },
   nodeModules: ['a-package', /^@my-company\/native-/],
 });
 ```
@@ -73,7 +79,9 @@ Synchronous operations use synchronous XHR. The request is MessagePack binary; t
 
 Each connection owns one Worker. Closing the connection stops the Worker; Worker exit or failure closes the connection and rejects pending work. Credentials are checked at initial establishment. Subsequent messages route to that connection's Worker without module allowlists or per-operation permission checks. Worker console output, standard output/error, and uncaught errors are projected into the browser.
 
-`vite build` creates `dist/public`, the shared host and Worker runtime in `dist/server`, a deployment `package.json`, and `dist/main.mjs`. Install the generated dependencies and run `npm start` in `dist`. `PORT` and `HOST` configure the listener. Vite controls application minification through its normal `build.minify` option.
+Run `vite build` followed by `vite preview` to try the built application locally, including its native Node.js handlers. Preview uses the plugin's credentials and respects Vite's base path and preview options.
+
+`vite build` creates `dist/public`, the shared host and Worker runtime in `dist/server`, a deployment `package.json`, and `dist/main.mjs`. For standalone deployment, install the generated dependencies and run `npm start` in `dist`. `PORT` and `HOST` configure the standalone listener. Vite controls application minification through its normal `build.minify` option.
 
 A remote reference remains a JavaScript proxy. Owner methods and constructors preserve native receivers, but a browser intrinsic that directly inspects private engine state—such as `Map.prototype.get.call(remoteMap)`—cannot acquire another process's internal slots. Use `remoteMap.get(key)` to invoke its native handler. Synchronous module loading also retains Node's restriction on modules with top-level asynchronous initialization; use asynchronous `import()` for those modules. Lumiana does not claim to erase these engine constraints or network latency.
 

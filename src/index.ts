@@ -6,8 +6,10 @@ import { isBuiltin, createRequire } from 'node:module';
 import { attachHost } from './host.js';
 import { Bundling, bare, transformSource, nativeExportNames } from './build.js';
 export interface LumianaPluginOptions {
-  username?: string;
-  password?: string;
+  defaultCredentials?: {
+    username?: string;
+    password?: string;
+  };
   /** Packages to execute natively instead of including them in the browser bundle. */
   nodeModules?: (string | RegExp)[];
 }
@@ -24,8 +26,8 @@ export function lumiana(options: LumianaPluginOptions = {}): Plugin {
     deploymentDir: string,
     failed = false;
   const credentials = () => ({
-    username: options.username ?? process.env.LUMIANA_USERNAME ?? 'lumiana',
-    password: options.password ?? process.env.LUMIANA_PASSWORD ?? 'lumiana',
+    username: options.defaultCredentials?.username ?? process.env.LUMIANA_USERNAME ?? 'lumiana',
+    password: options.defaultCredentials?.password ?? process.env.LUMIANA_PASSWORD ?? 'lumiana',
   });
   const base = () => new URL(config.base || '/', 'http://lumiana.invalid/').pathname;
   const prefix = () => `${base()}__lumiana/`;
@@ -166,7 +168,7 @@ export function lumiana(options: LumianaPluginOptions = {}): Plugin {
           include: ['events/', 'buffer/'],
           ...optimizer,
         },
-        ...(env.command === 'build'
+        ...(env.command === 'build' || env.isPreview
           ? { build: { outDir: path.join(deploymentDir, 'public') } }
           : {}),
       } as UserConfig;
@@ -224,6 +226,15 @@ export function lumiana(options: LumianaPluginOptions = {}): Plugin {
       };
       server.watcher.on('change', changed);
       server.httpServer.once('close', () => server.watcher.off('change', changed));
+    },
+    configurePreviewServer(server) {
+      const host = attachHost(server.httpServer, {
+        root: config.root,
+        ...credentials(),
+        path: prefix(),
+        mode: 'production',
+      });
+      server.middlewares.use((req, res, next) => void host.handle(req, res, next));
     },
     buildEnd(error) {
       failed = Boolean(error);
