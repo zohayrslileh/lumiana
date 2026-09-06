@@ -1,4 +1,5 @@
 import { Buffer } from 'buffer';
+export { Buffer } from 'buffer';
 import {
   dispatchKernel,
   installKernel,
@@ -338,7 +339,9 @@ export const connect = {
                     error: encodeException(error),
                   }),
                 )
-                .then((reply) => send(c, reply));
+                .then((reply) => {
+                  if (state.connection === c && c.socket.readyState === 1) send(c, reply);
+                });
               return;
             }
             const pending = c.pending.get(packet.id);
@@ -448,21 +451,27 @@ function materializeAddon(c: Connection, descriptor: any): any {
   if (descriptor.prototype) Object.setPrototypeOf(value, materializeAddon(c, descriptor.prototype));
   for (const property of descriptor.properties) {
     if (property.key === 'prototype' && typeof value === 'function') {
-      value.prototype = materializeAddon(
-        c,
-        addonOperation(c, 'addon.get', descriptor.handle, property.key),
-      );
+      value.prototype =
+        property.value === undefined
+          ? materializeAddon(c, addonOperation(c, 'addon.get', descriptor.handle, property.key))
+          : materializeAddon(c, property.value);
       continue;
     }
+    let current = property.value === undefined ? undefined : materializeAddon(c, property.value);
     Object.defineProperty(value, property.key, {
       configurable: true,
       enumerable: property.enumerable,
       get: () =>
-        materializeAddon(c, addonOperation(c, 'addon.get', descriptor.handle, property.key)),
+        property.value === undefined
+          ? property.kind === 'data' || property.get
+            ? materializeAddon(c, addonOperation(c, 'addon.get', descriptor.handle, property.key))
+            : undefined
+          : current,
       ...(property.writable
         ? {
             set: (next: any) => {
               addonOperation(c, 'addon.set', descriptor.handle, property.key, next);
+              if (property.value !== undefined) current = next;
             },
           }
         : {}),
@@ -472,9 +481,9 @@ function materializeAddon(c: Connection, descriptor: any): any {
 }
 
 /** @internal Materialize a native addon's API as local browser functions and objects. */
-export function nativeAddon(specifier: string): any {
+export function nativeAddon(specifier: string, sourceOrigin?: string): any {
   const c = connection();
-  return materializeAddon(c, addonOperation(c, 'addon.load', specifier));
+  return materializeAddon(c, addonOperation(c, 'addon.load', specifier, sourceOrigin));
 }
 /** @internal Hybrid invocation emitted for unbound fetch. */
 export function hybridFetch(input: RequestInfo | URL, init?: RequestInit): Promise<Response> {

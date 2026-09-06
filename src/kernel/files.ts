@@ -1,9 +1,16 @@
 import fs, { type FileHandle } from 'node:fs/promises';
 import nodeFS from 'node:fs';
+import nodeTTY from 'node:tty';
 
 type Emit = (handle: number, event: string, ...args: any[]) => void;
 interface WatcherRecord {
   watcher: { close(): void; ref(): any; unref(): any };
+  attached: boolean;
+  events: [string, any[]][];
+}
+
+interface DescriptorStreamRecord {
+  stream: nodeTTY.ReadStream;
   attached: boolean;
   events: [string, any[]][];
 }
@@ -73,6 +80,7 @@ export class FileKernel {
   private sequence = 0;
   private handles = new Map<number, FileHandle>();
   private watchers = new Map<number, WatcherRecord>();
+  private streams = new Map<number, DescriptorStreamRecord>();
   constructor(
     private emit: Emit = () => {},
     private allocate: () => number = () => ++this.sequence,
@@ -83,6 +91,8 @@ export class FileKernel {
     this.handles.clear();
     for (const { watcher } of this.watchers.values()) watcher.close();
     this.watchers.clear();
+    for (const { stream } of this.streams.values()) stream.destroy();
+    this.streams.clear();
     await Promise.allSettled(handles.map((handle) => handle.close()));
   }
 
@@ -99,7 +109,15 @@ export class FileKernel {
     else record.events.push([event, args]);
   }
 
+  private publishStream(handle: number, event: string, ...args: any[]): void {
+    const record = this.streams.get(handle);
+    if (!record) return;
+    if (record.attached) this.emit(handle, event, ...args);
+    else record.events.push([event, args]);
+  }
+
   executeSync(operation: string, args: any[]): any {
+    if (operation === 'fs.isatty') return nodeTTY.isatty(args[0]);
     const name = operation.slice('fs.'.length);
     if (!operation.startsWith('fs.') || (name !== 'existsSync' && !name.endsWith('Sync')))
       throw new TypeError(`Unknown synchronous filesystem operation ${operation}`);
@@ -111,6 +129,50 @@ export class FileKernel {
 
   async execute(operation: string, args: any[]): Promise<any> {
     switch (operation) {
+      case 'fs.fd.readStream': {
+        const handle = this.allocate();
+        const stream = new nodeTTY.ReadStream(args[0]);
+        const record: DescriptorStreamRecord = { stream, attached: false, events: [] };
+        this.streams.set(handle, record);
+        stream.pause();
+        stream.on('data', (data) =>
+          this.publishStream(handle, 'data', new Uint8Array(Buffer.from(data))),
+        );
+        stream.on('end', () => this.publishStream(handle, 'end'));
+        stream.on('error', (error: NodeJS.ErrnoException) =>
+          this.publishStream(handle, 'error', {
+            name: error.name,
+            message: error.message,
+            stack: error.stack,
+            code: error.code,
+            errno: error.errno,
+            syscall: error.syscall,
+          }),
+        );
+        stream.on('close', () => {
+          this.publishStream(handle, 'close');
+          this.streams.delete(handle);
+        });
+        return handle;
+      }
+      case 'fs.fd.readStream.attach': {
+        const record = this.streams.get(Number(args[0]));
+        if (!record) return undefined;
+        record.attached = true;
+        for (const [event, values] of record.events) this.emit(Number(args[0]), event, ...values);
+        record.events.length = 0;
+        record.stream.resume();
+        return undefined;
+      }
+      case 'fs.fd.readStream.pause':
+        this.streams.get(Number(args[0]))?.stream.pause();
+        return undefined;
+      case 'fs.fd.readStream.resume':
+        this.streams.get(Number(args[0]))?.stream.resume();
+        return undefined;
+      case 'fs.fd.readStream.destroy':
+        this.streams.get(Number(args[0]))?.stream.destroy();
+        return undefined;
       case 'fs.watch': {
         const handle = this.allocate();
         const watcher = nodeFS.watch(args[0], args[1], (eventType, filename) =>

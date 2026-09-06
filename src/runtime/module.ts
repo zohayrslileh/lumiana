@@ -25,6 +25,7 @@ import perfHooks from './perf-hooks.js';
 import tty from './tty.js';
 import v8 from './v8.js';
 import vm from './vm.js';
+import workerThreads from './worker-threads.js';
 
 const local: Record<string, any> = Object.assign(Object.create(null), {
   assert,
@@ -54,6 +55,7 @@ const local: Record<string, any> = Object.assign(Object.create(null), {
   zlib,
   v8,
   vm,
+  worker_threads: workerThreads,
 });
 
 const names = new Set([

@@ -187,16 +187,33 @@ test('client contract through real HTTP, binary WebSocket and an isolated native
       path.resolve('node_modules/package'),
     );
     assert.equal((await lumiana.status()).pid, pid);
+    const beforeAddon = XMLHttpRequest.requests;
     const addon = nativeAddon('./test/fixtures/addon.cjs');
+    assert.equal(XMLHttpRequest.requests - beforeAddon, 1, 'native addon loading is one call');
+    const beforeAddonProperties = XMLHttpRequest.requests;
+    assert.equal(typeof addon.record, 'function');
+    assert.equal(typeof addon.Counter, 'function');
+    assert.equal(
+      XMLHttpRequest.requests,
+      beforeAddonProperties,
+      'native addon exports and their prototypes materialize during loading',
+    );
+    const beforeAddonInvocation = XMLHttpRequest.requests;
+    assert.deepEqual(addon.record(), { local: true, values: [1, 2, 3] });
+    assert.equal(
+      XMLHttpRequest.requests - beforeAddonInvocation,
+      1,
+      'a native addon method is one operation without reflection calls',
+    );
     assert.equal(
       addon.call(20, (value: number) => value + 22),
       42,
     );
     assert.equal(await addon.later(20, async (value: number) => value + 22), 42);
-    assert.deepEqual(addon.record(), { local: true, values: [1, 2, 3] });
     const counter = new addon.Counter(2);
     assert.equal(counter instanceof addon.Counter, true);
     assert.equal(counter.add(3), 5);
+    assert.equal(counter.value, 5, 'mutable native resource data remains live');
     let thrown: unknown;
     try {
       addon.throwValue();

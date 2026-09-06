@@ -20,6 +20,15 @@ test('both Node builtin specifier forms establish Node execution provenance', ()
     assert.equal(requiresNodeResolution(source), true, source);
 
   assert.equal(requiresNodeResolution("const utility = require('utility');"), false);
+  for (const source of [
+    'export const platform=process.platform;',
+    'export const architecture=process.arch;',
+    'export const directory=process.cwd();',
+    'export const home=process.env.HOME;',
+  ])
+    assert.equal(requiresNodeResolution(source), true, source);
+  assert.equal(requiresNodeResolution('export const mode=process.env.NODE_ENV;'), false);
+  assert.equal(requiresNodeResolution("export const present=typeof process!=='undefined';"), false);
 });
 test('read-chain transforms preserve calls, writes, optional access and computed-key ordering', async () => {
   const source = `export default function () {
@@ -140,6 +149,34 @@ test('dependency environment probes remain owned by Vite and the browser', async
     null,
     'Vite owns its NODE_ENV replacement in application modules too',
   );
+
+  const globalAlias = await transformSource(
+    'module.exports = global.crypto && global.queueMicrotask;',
+    'node_modules/dependency/browser.js',
+    {
+      place: async () => ({}),
+      nodeGlobals: false,
+    },
+  );
+  assert.equal(
+    globalAlias?.code,
+    'module.exports = globalThis.crypto && globalThis.queueMicrotask;',
+    'an unbound Node global alias is local browser syntax, regardless of package conditions',
+  );
+
+  const concreteGlobals = await transformSource(
+    'export const input = value => Buffer.isBuffer(value);export const here=__filename;',
+    'node_modules/dependency/browser.js',
+    {
+      place: async () => ({}),
+      nodeGlobals: false,
+      origin: 'node_modules/dependency/browser.js',
+    },
+  );
+  assert.match(concreteGlobals!.code, /Buffer as __lumiana/);
+  assert.match(concreteGlobals!.code, /moduleFilename as __lumiana/);
+  assert.doesNotMatch(concreteGlobals!.code, /\bBuffer\.isBuffer/);
+  assert.doesNotMatch(concreteGlobals!.code, /\b__filename\b/);
 });
 test('module export evidence follows export-all edges', async () => {
   const root = await fs.mkdtemp(path.join(os.tmpdir(), 'lumiana-exports-'));
@@ -270,6 +307,79 @@ test('packages remain local and native-addon ownership is tracked independently'
     );
     assert.deepEqual(await addons.dependencies(), { 'native-package': '2.0.0' });
 
+    const exportedRoot = path.join(temp, 'node_modules', 'exported-native-package');
+    await fs.mkdir(path.join(exportedRoot, 'lib'), { recursive: true });
+    await fs.writeFile(
+      path.join(exportedRoot, 'package.json'),
+      JSON.stringify({
+        name: 'exported-native-package',
+        version: '3.0.0',
+        exports: { './binding.node': './loader.cjs' },
+      }),
+    );
+    await fs.writeFile(
+      path.join(exportedRoot, 'loader.cjs'),
+      "module.exports=require('./lib/binding.node')",
+    );
+    await fs.writeFile(path.join(exportedRoot, 'lib/binding.node'), 'binary fixture');
+    assert.equal(
+      await addons.locate('exported-native-package/binding.node', path.join(temp, 'entry.mjs')),
+      'exported-native-package/binding.node',
+      'a .node package export keeps its public identity while tracking the native loader',
+    );
+
+    const libraryRoot = path.join(temp, 'node_modules', 'image-library');
+    const platformRoot = path.join(temp, 'node_modules', '@native', 'platform');
+    await fs.mkdir(libraryRoot, { recursive: true });
+    await fs.mkdir(platformRoot, { recursive: true });
+    await fs.writeFile(
+      path.join(libraryRoot, 'package.json'),
+      JSON.stringify({ name: 'image-library', version: '4.0.0' }),
+    );
+    await fs.writeFile(
+      path.join(platformRoot, 'package.json'),
+      JSON.stringify({
+        name: '@native/platform',
+        version: '1.0.0',
+        exports: { './binding.node': './loader.cjs' },
+      }),
+    );
+    await fs.writeFile(
+      path.join(platformRoot, 'loader.cjs'),
+      "module.exports=require('./binding.node')",
+    );
+    await fs.writeFile(path.join(platformRoot, 'binding.node'), 'platform binary fixture');
+    const boundary = new NativeAddons(temp);
+    assert.equal(
+      await boundary.locate(
+        '@native/platform/binding.node',
+        path.join(libraryRoot, 'native-loader.cjs'),
+      ),
+      '@native/platform/binding.node',
+    );
+    assert.deepEqual(
+      await boundary.dependencies(),
+      { 'image-library': '4.0.0' },
+      'the JavaScript package at the native boundary owns the deployed dependency',
+    );
+
+    const contextualAddon = await transformSource(
+      "import {createRequire} from 'node:module';const require=createRequire(import.meta.url);export const load=()=>require('native-package/binding.node');",
+      path.join(temp, 'entry.mjs'),
+      {
+        origin: 'entry.mjs',
+        locateAddon: (request, computed) =>
+          addons.locate(request, path.join(temp, 'entry.mjs'), computed),
+        place: async () => ({}),
+      },
+    );
+    assert.match(contextualAddon!.code, /nativeAddon as __lumiana/);
+    assert.match(
+      contextualAddon!.code,
+      /__lumiana\d+\("native-package\/binding\.node","entry\.mjs"\)/,
+    );
+    assert.doesNotMatch(contextualAddon!.code, /require\('native-package\/binding\.node'\)/);
+
     const located = await transformSource(
       "module.exports=require('addon-locator')('binding.node');",
       path.join(packageRoot, 'loader.cjs'),
@@ -280,7 +390,10 @@ test('packages remain local and native-addon ownership is tracked independently'
       },
     );
     assert.match(located!.code, /nativeAddon:__lumiana/);
-    assert.match(located!.code, /\("native-package\/binding\.node"\)/);
+    assert.match(
+      located!.code,
+      /\("native-package\/binding\.node","node_modules\/native-package\/loader\.cjs"\)/,
+    );
     assert.doesNotMatch(located!.code, /addon-locator/);
 
     const computed = await transformSource(
@@ -294,8 +407,28 @@ test('packages remain local and native-addon ownership is tracked independently'
       },
     );
     assert.match(computed!.code, /nativeAddon:__lumiana/);
-    assert.match(computed!.code, /__lumiana\d+\(file\)/);
+    assert.match(
+      computed!.code,
+      /specifier=>__lumiana\d+\(specifier,"node_modules\/native-package\/computed-loader\.cjs"\)\)\(file\)/,
+    );
     assert.doesNotMatch(computed!.code, /require\(file\)/);
+
+    const concatenated = await transformSource(
+      "module.exports=name=>require('./prebuilds/'+process.platform+'-'+process.arch+'/'+name+'.node');",
+      path.join(packageRoot, 'concatenated-loader.cjs'),
+      {
+        origin: 'node_modules/native-package/concatenated-loader.cjs',
+        locateAddon: (request, computed) =>
+          addons.locate(request, path.join(packageRoot, 'concatenated-loader.cjs'), computed),
+        place: async () => ({}),
+      },
+    );
+    assert.match(concatenated!.code, /nativeAddon:__lumiana/);
+    assert.match(
+      concatenated!.code,
+      /specifier,"node_modules\/native-package\/concatenated-loader\.cjs"/,
+    );
+    assert.match(concatenated!.code, /name\+'\.node'\)/);
 
     const transformed = await transformSource(
       "import {read,add} from 'good';export const values=[read,add(1,2)];",

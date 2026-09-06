@@ -1,16 +1,63 @@
 import stream from 'stream-browserify';
+import { Buffer } from 'buffer';
+import { kernelCall, kernelCallSync, kernelSubscribe } from './bridge.js';
 
-export const isatty = (_fd: number) => false;
+export const isatty = (fd: number) => kernelCallSync('fs.isatty', fd);
+
+const error = (value: any) => Object.assign(new Error(value.message), value);
 
 export class ReadStream extends stream.Readable {
   isRaw = false;
-  isTTY = false;
+  isTTY = true;
+  private handle?: number;
+  private release?: () => void;
+  private pendingRead = false;
+
+  constructor(
+    readonly fd: number,
+    options: any = {},
+  ) {
+    super({ ...options, emitClose: true });
+    void kernelCall('fs.fd.readStream', fd).then(
+      (handle) => {
+        this.handle = handle;
+        this.release = kernelSubscribe(handle, (event, args) => {
+          if (event === 'data') {
+            if (!this.push(Buffer.from(args[0])))
+              void kernelCall('fs.fd.readStream.pause', handle).catch((error) =>
+                this.destroy(error),
+              );
+          } else if (event === 'end') this.push(null);
+          else if (event === 'error') this.destroy(error(args[0]));
+          else if (event === 'close') {
+            this.release?.();
+            if (!this.destroyed) this.destroy();
+          }
+        });
+        void kernelCall('fs.fd.readStream.attach', handle).catch((error) => this.destroy(error));
+        if (this.destroyed) void kernelCall('fs.fd.readStream.destroy', handle).catch(() => {});
+        else if (this.pendingRead)
+          void kernelCall('fs.fd.readStream.resume', handle).catch((error) => this.destroy(error));
+      },
+      (reason) => this.destroy(reason),
+    );
+  }
+
   setRawMode(mode: boolean) {
     this.isRaw = mode;
     return this;
   }
+
   _read() {
-    this.push(null);
+    this.pendingRead = true;
+    if (this.handle !== undefined)
+      void kernelCall('fs.fd.readStream.resume', this.handle).catch((error) => this.destroy(error));
+  }
+
+  override destroy(error?: Error) {
+    if (this.handle !== undefined)
+      void kernelCall('fs.fd.readStream.destroy', this.handle).catch(() => {});
+    return super.destroy(error);
   }
 }
 

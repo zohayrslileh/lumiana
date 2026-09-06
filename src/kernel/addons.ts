@@ -20,7 +20,10 @@ interface PropertyDescriptorRecord {
   key: string;
   configurable: boolean;
   enumerable: boolean;
+  kind: 'data' | 'accessor';
   writable?: boolean;
+  value?: Descriptor;
+  get?: boolean;
 }
 
 /** Native-addon state is an explicit host resource; package JavaScript never enters this kernel. */
@@ -31,7 +34,7 @@ export class AddonKernel {
   private callbacks = new Map<number, Function>();
 
   constructor(
-    root: string,
+    private root: string,
     private allocate: () => number,
     private invokeCallback: (id: number, receiver: Descriptor, args: Descriptor[]) => any,
   ) {
@@ -77,12 +80,21 @@ export class AddonKernel {
         continue;
       const descriptor = Object.getOwnPropertyDescriptor(value, key);
       if (!descriptor) continue;
-      properties.push({
+      const property: PropertyDescriptorRecord = {
         key,
         configurable: descriptor.configurable ?? true,
         enumerable: descriptor.enumerable ?? false,
+        kind: 'value' in descriptor ? 'data' : 'accessor',
         writable: 'writable' in descriptor ? descriptor.writable : Boolean(descriptor.set),
-      });
+      };
+      if ('value' in descriptor) {
+        const described = this.describe(descriptor.value, expanding);
+        // Behavioral values are stable capability references. Include them in the
+        // containing resource graph so reading a method is always local. Copyable
+        // data remains live and is read through its own boundary operation.
+        if (described.kind !== 'copy' || key === 'prototype') property.value = described;
+      } else property.get = typeof descriptor.get === 'function';
+      properties.push(property);
     }
     const prototype = Object.getPrototypeOf(value);
     const includePrototype =
@@ -154,7 +166,9 @@ export class AddonKernel {
   executeSync(operation: string, args: any[]): any {
     switch (operation) {
       case 'addon.load':
-        return this.describe(this.require(args[0]));
+        return this.describe(
+          args[1] ? createRequire(path.join(this.root, args[1]))(args[0]) : this.require(args[0]),
+        );
       case 'addon.get':
         return this.describe(Reflect.get(this.value(args[0]), args[1], this.value(args[0])));
       case 'addon.set':

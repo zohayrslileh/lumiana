@@ -1,20 +1,26 @@
-import Database from 'better-sqlite3';
+import sharp from 'sharp';
 
-const database = new Database(':memory:');
+const image = await sharp({
+  create: {
+    width: 300,
+    height: 180,
+    channels: 4,
+    background: '#22c7b8',
+  },
+})
+  .png()
+  .toBuffer();
 
-database.exec(`
-    CREATE TABLE messages (
-      id INTEGER PRIMARY KEY,
-      text TEXT NOT NULL
-    )
-  `);
+const url = URL.createObjectURL(
+  new Blob([new Uint8Array(image)], {
+    type: 'image/png',
+  }),
+);
 
-const insert = database.prepare('INSERT INTO messages (text) VALUES (?)');
+const element = document.createElement('img');
 
-insert.run('Hello from Lumiana');
+element.src = url;
+element.alt = 'Generated with Sharp';
+element.onload = () => URL.revokeObjectURL(url);
 
-const messages = database.prepare('SELECT * FROM messages').all();
-
-console.log(messages);
-
-database.close();
+document.body.appendChild(element);

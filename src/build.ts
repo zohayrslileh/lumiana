@@ -40,6 +40,18 @@ export function requiresNodeResolution(source: string): boolean {
   let required = false;
 
   const nodeBuiltin = (value: unknown) => typeof value === 'string' && isBuiltin(value);
+  const viteEnvironment = (path: any) => {
+    const environment = path.parentPath?.node;
+    const variable = path.parentPath?.parentPath?.node;
+    return (
+      environment?.type === 'MemberExpression' &&
+      environment.object === path.node &&
+      staticKey(environment) === 'env' &&
+      variable?.type === 'MemberExpression' &&
+      variable.object === environment &&
+      staticKey(variable) === 'NODE_ENV'
+    );
+  };
 
   traverse(ast as any, {
     ImportDeclaration(path: any) {
@@ -68,6 +80,13 @@ export function requiresNodeResolution(source: string): boolean {
         !path.scope.getBinding(path.node.name)
       )
         required = true;
+      if (
+        path.node.name === 'process' &&
+        !path.scope.getBinding('process') &&
+        path.parentPath?.node.type !== 'UnaryExpression' &&
+        !viteEnvironment(path)
+      )
+        required = true;
     },
   });
   return required;
@@ -87,13 +106,26 @@ export class NativeAddons {
     const name = relative.startsWith('@') ? parts.slice(0, 2).join('/') : parts[0]!;
     return { name, root: normalized.slice(0, index + marker.length) + name };
   }
-  addon(file: string): string {
+  addon(file: string, importer = file): string {
     const normalized = file.split(path.sep).join('/');
-    const owner = this.owner(file);
-    this.addons.set(owner.name, path.join(owner.root, 'package.json'));
+    const nativeOwner = this.owner(file);
+    let boundaryOwner = nativeOwner;
+    try {
+      boundaryOwner = this.owner(importer);
+    } catch {}
+    this.addons.set(boundaryOwner.name, path.join(boundaryOwner.root, 'package.json'));
     return normalized.slice(normalized.lastIndexOf('/node_modules/') + '/node_modules/'.length);
   }
   async locate(request: string, importer: string, computed = false): Promise<string | undefined> {
+    if (!computed) {
+      try {
+        const resolved = createRequire(importer).resolve(request);
+        if (request.endsWith('.node')) {
+          const deployed = this.addon(resolved, importer);
+          return !request.startsWith('.') && !path.isAbsolute(request) ? request : deployed;
+        }
+      } catch {}
+    }
     const owner = this.owner(importer);
     const binaries: string[] = [];
     const visit = async (directory: string): Promise<void> => {
@@ -107,6 +139,12 @@ export class NativeAddons {
     let matches = binaries.filter((file) => path.basename(file) === path.basename(request));
     if (!matches.length && computed) matches = binaries;
     if (!matches.length) return undefined;
+    if (computed) {
+      const platform = process.platform === 'win32' ? 'win32' : process.platform;
+      const host = matches.filter((file) => file.includes(platform) && file.includes(process.arch));
+      if (host.length) matches = host;
+      return this.addon(matches[0]!, importer);
+    }
     if (matches.length > 1) {
       const platform = process.platform === 'win32' ? 'win32' : process.platform;
       const host = matches.filter((file) => file.includes(platform) && file.includes(process.arch));
@@ -116,7 +154,7 @@ export class NativeAddons {
       throw new Error(
         `Cannot choose ${JSON.stringify(request)} for ${owner.name}: ${matches.join(', ')}`,
       );
-    return this.addon(matches[0]!);
+    return this.addon(matches[0]!, importer);
   }
   async dependencies(): Promise<Record<string, string>> {
     const dependencies: Record<string, string> = {};
@@ -211,13 +249,13 @@ export async function transformSource(source: string, id: string, options: Trans
     globals: any[] = [],
     addonCalls: any[] = [],
     dynamicRequires: any[] = [];
-  const addonRequests = new Set<string>();
   const contextualRequire = new Set<any>();
   const fileURLToPathBindings = new Set<any>();
   const urlModuleBindings = new Set<any>();
   const contextualCalls: any[] = [];
   let moduleLocationChanged = false;
   let moduleSourceChanged = false;
+  let globalAliasChanged = false;
   let counter = 0;
   const reserved = new Set<string>();
   traverse(ast as any, {
@@ -350,6 +388,18 @@ export async function transformSource(source: string, id: string, options: Trans
           call.node.callee === reference.node &&
           specifier !== undefined
         ) {
+          if (options.locateAddon && specifier.endsWith('.node')) {
+            const located = await options.locateAddon(specifier);
+            if (located) {
+              used.add('nativeAddon');
+              edits.overwrite(
+                call.node.start,
+                call.node.end,
+                `${addonName}(${JSON.stringify(located)},${JSON.stringify(options.origin)})`,
+              );
+              continue;
+            }
+          }
           if ((await options.place(specifier)).available === false) unavailable.add(specifier);
         }
       }
@@ -392,16 +442,6 @@ export async function transformSource(source: string, id: string, options: Trans
         else dynamicRequires.push(p);
       }
     },
-    StringLiteral(p: any) {
-      if (p.node.value.length > '.node'.length && p.node.value.endsWith('.node'))
-        addonRequests.add(p.node.value);
-    },
-    TemplateLiteral(p: any) {
-      if (p.node.expressions.length) return;
-      const value = p.node.quasis[0]?.value.cooked;
-      if (value && value.length > '.node'.length && value.endsWith('.node'))
-        addonRequests.add(value);
-    },
     ImportExpression(p: any) {
       if (p.node.source.type === 'StringLiteral') moduleNodes.push(p);
     },
@@ -413,18 +453,13 @@ export async function transformSource(source: string, id: string, options: Trans
       )
         commonjs = true;
       if (p.scope.getBinding(p.node.name)) return;
-      if (['fetch', 'WebSocket'].includes(p.node.name)) globals.push(p);
+      if (
+        ['fetch', 'WebSocket', 'global', 'Buffer', '__filename', '__dirname'].includes(p.node.name)
+      )
+        globals.push(p);
       else if (
         options.nodeGlobals !== false &&
-        [
-          'Buffer',
-          'process',
-          'global',
-          'setImmediate',
-          'clearImmediate',
-          '__filename',
-          '__dirname',
-        ].includes(p.node.name) &&
+        ['process', 'setImmediate', 'clearImmediate'].includes(p.node.name) &&
         !(p.node.name === 'process' && viteEnvironment(p))
       )
         globals.push(p);
@@ -458,22 +493,47 @@ export async function transformSource(source: string, id: string, options: Trans
     const located = await options.locateAddon!(p.node.arguments[0].value);
     if (!located) continue;
     used.add('nativeAddon');
-    edits.overwrite(p.node.start, p.node.end, `${addonName}(${JSON.stringify(located)})`);
+    edits.overwrite(
+      p.node.start,
+      p.node.end,
+      `${addonName}(${JSON.stringify(located)},${JSON.stringify(options.origin)})`,
+    );
   }
 
-  let dynamicAddonEvidence = false;
-  if (options.locateAddon && dynamicRequires.length)
-    for (const request of addonRequests) {
-      if (await options.locateAddon(request, true)) {
-        dynamicAddonEvidence = true;
-        break;
-      }
+  const addonHint = (node: any, scope: any, seen = new Set<any>()): string | undefined => {
+    node = unwrapExpression(node);
+    if (!node) return;
+    if (node.type === 'StringLiteral') return node.value.endsWith('.node') ? node.value : undefined;
+    if (node.type === 'TemplateLiteral') {
+      const tail = node.quasis.at(-1)?.value.cooked;
+      return tail?.endsWith('.node') ? tail : undefined;
     }
-  if (dynamicAddonEvidence) {
-    used.add('nativeAddon');
-    for (const p of dynamicRequires)
-      edits.overwrite(p.node.callee.start, p.node.callee.end, addonName);
-  }
+    if (node.type === 'Identifier') {
+      const binding = scope.getBinding(node.name);
+      if (!binding || seen.has(binding)) return;
+      seen.add(binding);
+      return addonHint(binding.path.node.init, binding.path.scope, seen);
+    }
+    if (node.type === 'BinaryExpression' && node.operator === '+')
+      return addonHint(node.right, scope, seen) ?? addonHint(node.left, scope, seen);
+    if (node.type === 'CallExpression')
+      for (const argument of node.arguments) {
+        const hint = addonHint(argument, scope, seen);
+        if (hint) return hint;
+      }
+    return;
+  };
+  if (options.locateAddon)
+    for (const p of dynamicRequires) {
+      const hint = addonHint(p.node.arguments[0], p.scope);
+      if (!hint || !(await options.locateAddon(hint, true))) continue;
+      used.add('nativeAddon');
+      edits.overwrite(
+        p.node.callee.start,
+        p.node.callee.end,
+        `(specifier=>${addonName}(specifier,${JSON.stringify(options.origin)}))`,
+      );
+    }
 
   for (const p of globals) {
     const n = p.node;
@@ -492,6 +552,7 @@ export async function transformSource(source: string, id: string, options: Trans
       replacement = processName;
     } else if (n.name === 'global') {
       replacement = 'globalThis';
+      globalAliasChanged = true;
     } else if (n.name === 'setImmediate') {
       usesTimers = true;
       replacement = immediateName;
@@ -511,7 +572,14 @@ export async function transformSource(source: string, id: string, options: Trans
       replacement = `${n.name}: ${replacement}`;
     edits.overwrite(n.start, n.end, replacement);
   }
-  if (!used.size && !usesProcess && !usesTimers && !moduleLocationChanged && !moduleSourceChanged)
+  if (
+    !used.size &&
+    !usesProcess &&
+    !usesTimers &&
+    !globalAliasChanged &&
+    !moduleLocationChanged &&
+    !moduleSourceChanged
+  )
     return null;
   const names: Record<string, string> = {
     hybridFetch: fetchName,

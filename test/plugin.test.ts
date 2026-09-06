@@ -38,6 +38,13 @@ test('Vite keeps package JavaScript local and deploys only detected native addon
     await pkg('browser-cjs', {
       'index.js': "module.exports=(value={deep:{value:'cjs-proof'}})=>value.deep.value;",
     });
+    await pkg(
+      'portable-buffer',
+      {
+        'index.js': "export const bufferProof=Buffer.from('buffer-proof').toString();",
+      },
+      { type: 'module' },
+    );
     await pkg('portable-inheritance', {
       'index.js':
         "const {EventEmitter}=require('node:events');const {inherits}=require('node:util');function Boot(){this.setMaxListeners(0)}inherits(Boot,EventEmitter);module.exports=()=>new Boot() instanceof EventEmitter?'inheritance-proof':'broken';",
@@ -111,6 +118,17 @@ test('Vite keeps package JavaScript local and deploys only detected native addon
       'index.js': "module.exports=require('./binding.node');",
       'binding.node': 'binary native-proof',
     });
+    await pkg(
+      '@native/platform',
+      {
+        'loader.cjs': "module.exports=require('./binding.node');",
+        'binding.node': 'transitive platform binary',
+      },
+      { exports: { './binding.node': './loader.cjs' } },
+    );
+    await pkg('native-wrapper', {
+      'index.js': "module.exports=require('@native/platform/binding.node');",
+    });
     await pkg('explicit', { 'index.js': "export default 'explicit-proof';" }, { type: 'module' });
     await fs.writeFile(
       path.join(root, 'index.html'),
@@ -122,7 +140,7 @@ test('Vite keeps package JavaScript local and deploys only detected native addon
     );
     await fs.writeFile(
       path.join(root, 'entry.js'),
-      "import {value,tmpdir} from 'portable';import cjs from 'browser-cjs';import inheritance from 'portable-inheritance';import environment from 'node-environment-library';import {filesystemProof} from 'filesystem-library';import {socketProof} from 'socket-library';import condition from 'conditional';import {WebSocketServer} from 'conditional-server';import adapter from 'node-adapter';import addon from 'native-addon';import explicit from 'explicit';export * from 'node:os';const server=new WebSocketServer();document.body.textContent=[value,tmpdir(),cjs(),inheritance(),environment(),filesystemProof,socketProof,condition,server.kind,adapter,addon,explicit].join(',');",
+      "import {value,tmpdir} from 'portable';import cjs from 'browser-cjs';import {bufferProof} from 'portable-buffer';import inheritance from 'portable-inheritance';import environment from 'node-environment-library';import {filesystemProof} from 'filesystem-library';import {socketProof} from 'socket-library';import condition from 'conditional';import {WebSocketServer} from 'conditional-server';import adapter from 'node-adapter';import addon from 'native-addon';import wrappedAddon from 'native-wrapper';import explicit from 'explicit';export * from 'node:os';const server=new WebSocketServer();document.body.textContent=[value,tmpdir(),cjs(),bufferProof,inheritance(),environment(),filesystemProof,socketProof,condition,server.kind,adapter,addon,wrappedAddon,explicit].join(',');",
     );
     await build({
       root,
@@ -144,6 +162,7 @@ test('Vite keeps package JavaScript local and deploys only detected native addon
     for (const text of [
       'bundled-proof',
       'cjs-proof',
+      'buffer-proof',
       'inheritance-proof',
       'node-environment-proof',
       'transitive-node-proof',
@@ -158,10 +177,16 @@ test('Vite keeps package JavaScript local and deploys only detected native addon
     assert.ok(!output.includes('service-worker-server'));
     assert.ok(!output.includes('"node:util"'));
     assert.doesNotMatch(output, /process\.platform\s*&&\s*typeof setImmediate/);
-    for (const text of ['browser-client-proof', 'binary native-proof'])
+    for (const text of [
+      'browser-client-proof',
+      'binary native-proof',
+      'transitive platform binary',
+    ])
       assert.ok(!output.includes(text), text);
     const manifest = JSON.parse(await fs.readFile(path.join(root, 'dist/package.json'), 'utf8'));
     assert.equal(manifest.dependencies['native-addon'], '1.0.0');
+    assert.equal(manifest.dependencies['native-wrapper'], '1.0.0');
+    assert.equal(manifest.dependencies['@native/platform'], undefined);
     assert.equal(manifest.dependencies.explicit, undefined);
     assert.equal(manifest.dependencies['conditional-server'], undefined);
     assert.equal(manifest.dependencies.portable, undefined);

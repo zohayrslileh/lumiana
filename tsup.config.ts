@@ -25,6 +25,7 @@ export default defineConfig({
     'runtime/util': 'src/runtime/util.ts',
     'runtime/v8': 'src/runtime/v8.ts',
     'runtime/vm': 'src/runtime/vm.ts',
+    'runtime/worker-threads': 'src/runtime/worker-threads.ts',
     'runtime/crypto': 'src/runtime/crypto.ts',
     'runtime/zlib': 'src/runtime/zlib.ts',
   },

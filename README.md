@@ -10,7 +10,7 @@ connection.
 This means a library can retain its normal JavaScript identity in the browser while its file
 handles, listening sockets, child processes, and native implementations remain on the server.
 
-![Lumiana execution architecture](./docs/lumiana-architecture.png)
+![Lumiana execution architecture](https://raw.githubusercontent.com/zohayrslileh/lumiana/main/docs/lumiana-architecture.png)
 
 ## How execution is divided
 

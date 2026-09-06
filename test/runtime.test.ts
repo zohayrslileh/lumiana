@@ -16,6 +16,9 @@ import crypto from '../src/runtime/crypto.js';
 import zlib from '../src/runtime/zlib.js';
 import * as runtimeURL from '../src/runtime/url.js';
 import runtimeUtil from '../src/runtime/util.js';
+import workerThreads from '../src/runtime/worker-threads.js';
+import runtimeTTY from '../src/runtime/tty.js';
+import { dispatchKernel, installKernel, removeKernel } from '../src/runtime/bridge.js';
 
 test('createRequire keeps portable CommonJS constructors local', () => {
   const require = createRequire(import.meta.url, 'test/runtime.test.ts');
@@ -42,6 +45,59 @@ test('promisify honors the process-wide Node custom implementation contract', as
   callback[runtimeUtil.promisify.custom] = () => Promise.resolve({ first: 1, second: 2 });
   assert.deepEqual(await runtimeUtil.promisify(callback)(), { first: 1, second: 2 });
   assert.equal(runtimeUtil.promisify.custom, Symbol.for('nodejs.util.promisify.custom'));
+});
+
+test('util inheritance is available without depending on its own compatibility module', () => {
+  function Parent(this: any) {}
+  Parent.prototype.read = () => 42;
+  function Child(this: any) {}
+  runtimeUtil.inherits(Child, Parent);
+  const child = new (Child as any)();
+  assert.equal(child.read(), 42);
+  assert.equal((Child as any).super_, Parent);
+  assert.equal(child.constructor, Child);
+});
+
+test('worker threads expose the browser-local main-thread contract', () => {
+  assert.equal(workerThreads.isMainThread, true);
+  assert.equal(workerThreads.threadId, 0);
+  assert.equal(workerThreads.parentPort, null);
+  workerThreads.setEnvironmentData('runtime-test', { local: true });
+  assert.deepEqual(workerThreads.getEnvironmentData('runtime-test'), { local: true });
+});
+
+test('TTY file descriptors retain a local readable stream', async () => {
+  const owner = {};
+  const operations: string[] = [];
+  installKernel(
+    owner,
+    async (operation, ...args) => {
+      operations.push(operation);
+      if (operation === 'fs.fd.readStream') return 7;
+      if (operation === 'fs.fd.readStream.attach') {
+        queueMicrotask(() => {
+          dispatchKernel(7, 'data', [new TextEncoder().encode('terminal')]);
+          dispatchKernel(7, 'end', []);
+        });
+      }
+    },
+    (operation) => {
+      assert.equal(operation, 'fs.isatty');
+      return true;
+    },
+  );
+  try {
+    assert.equal(runtimeTTY.isatty(9), true);
+    const terminal = new runtimeTTY.ReadStream(9);
+    terminal.setEncoding('utf8');
+    let output = '';
+    terminal.on('data', (chunk) => (output += chunk));
+    await once(terminal, 'end');
+    assert.equal(output, 'terminal');
+    assert.deepEqual(operations.slice(0, 2), ['fs.fd.readStream', 'fs.fd.readStream.attach']);
+  } finally {
+    removeKernel(owner);
+  }
 });
 
 test('URL values and path conversions execute locally with Node-compatible semantics', () => {

@@ -41,7 +41,21 @@ export const callbackify = browserUtil.callbackify;
 export const debuglog = browserUtil.debuglog;
 export const deprecate = browserUtil.deprecate;
 export const format = browserUtil.format;
-export const inherits = browserUtil.inherits;
+/** Establish Node's constructor/prototype inheritance without a dependency cycle through `util`. */
+export function inherits(constructor: Function, superConstructor: Function): void {
+  if (typeof constructor !== 'function')
+    throw new TypeError('The "constructor" argument must be of type function');
+  if (typeof superConstructor !== 'function')
+    throw new TypeError('The "superConstructor" argument must be of type function');
+  if (!superConstructor.prototype)
+    throw new TypeError('The "superConstructor.prototype" property must be an object');
+  Object.defineProperty(constructor, 'super_', {
+    configurable: true,
+    writable: true,
+    value: superConstructor,
+  });
+  Object.setPrototypeOf(constructor.prototype, superConstructor.prototype);
+}
 export const inspect = browserUtil.inspect;
 export const isArray = browserUtil.isArray;
 export const isBoolean = browserUtil.isBoolean;

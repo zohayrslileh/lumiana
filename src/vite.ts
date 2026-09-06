@@ -56,6 +56,7 @@ const runtimeBuiltins: Record<string, string> = Object.assign(Object.create(null
   util: 'runtime/util.js',
   v8: 'runtime/v8.js',
   vm: 'runtime/vm.js',
+  worker_threads: 'runtime/worker-threads.js',
   crypto: 'runtime/crypto.js',
   zlib: 'runtime/zlib.js',
 });
@@ -67,6 +68,7 @@ export function lumiana(options: LumianaPluginOptions = {}): Plugin {
   let config: ResolvedConfig,
     addons: NativeAddons,
     deploymentDir: string,
+    projectRoot: string,
     failed = false;
   const execution = new Map<string, Promise<boolean>>();
   const nodeFiles = new Set<string>();
@@ -90,6 +92,14 @@ export function lumiana(options: LumianaPluginOptions = {}): Plugin {
   });
   const base = () => new URL(config.base || '/', 'http://lumiana.invalid/').pathname;
   const prefix = () => `${base()}__lumiana/`;
+  const sourceOrigin = (importer?: string) =>
+    importer && path.isAbsolute(importer)
+      ? path.relative(projectRoot, importer.split('?')[0]!)
+      : undefined;
+  const addonId = (specifier: string, importer?: string) =>
+    addonPrefix + JSON.stringify({ specifier, origin: sourceOrigin(importer) });
+  const addonTarget = (id: string): { specifier: string; origin?: string } =>
+    JSON.parse(id.slice(addonPrefix.length));
   const skip = (id: string) =>
     id.startsWith(runtimeDir + '/') ||
     id.startsWith('\0') ||
@@ -126,6 +136,7 @@ export function lumiana(options: LumianaPluginOptions = {}): Plugin {
     enforce: 'pre',
     config(user, env) {
       const root = path.resolve(user.root ?? process.cwd());
+      projectRoot = root;
       addons = new NativeAddons(root);
       deploymentDir = path.resolve(root, user.build?.outDir ?? 'dist');
       const require = createRequire(path.join(root, 'package.json'));
@@ -200,7 +211,7 @@ export function lumiana(options: LumianaPluginOptions = {}): Plugin {
                           : importer
                             ? path.resolve(path.dirname(importer), id)
                             : undefined;
-                        if (file) return addonPrefix + addons.addon(file);
+                        if (file) return addonId(addons.addon(file, importer), importer);
                       }
                       if (id === runtimeSpecifier) return path.join(runtimeDir, 'browser.js');
                       const runtime = runtimeBuiltins[builtinName(id)];
@@ -217,8 +228,10 @@ export function lumiana(options: LumianaPluginOptions = {}): Plugin {
                       }
                     },
                     load(id: string) {
-                      if (id.startsWith(addonPrefix))
-                        return `import {nativeAddon} from ${JSON.stringify(runtimeSpecifier)};export default nativeAddon(${JSON.stringify(id.slice(addonPrefix.length))});`;
+                      if (id.startsWith(addonPrefix)) {
+                        const target = addonTarget(id);
+                        return `import {nativeAddon} from ${JSON.stringify(runtimeSpecifier)};export default nativeAddon(${JSON.stringify(target.specifier)},${JSON.stringify(target.origin)});`;
+                      }
                     },
                     async transform(this: any, code: string, id: string) {
                       if (skip(id)) return null;
@@ -270,14 +283,20 @@ export function lumiana(options: LumianaPluginOptions = {}): Plugin {
                           ? args.path
                           : path.resolve(args.resolveDir, args.path);
                         return {
-                          path: addons.addon(file),
+                          path: JSON.stringify({
+                            specifier: addons.addon(file, args.importer || file),
+                            origin: sourceOrigin(args.importer),
+                          }),
                           namespace: 'lumiana-addon',
                         };
                       });
-                      build.onLoad({ filter: /.*/, namespace: 'lumiana-addon' }, (args) => ({
-                        contents: `import {nativeAddon} from ${JSON.stringify(runtimeSpecifier)};export default nativeAddon(${JSON.stringify(args.path)});`,
-                        loader: 'js',
-                      }));
+                      build.onLoad({ filter: /.*/, namespace: 'lumiana-addon' }, (args) => {
+                        const target = JSON.parse(args.path);
+                        return {
+                          contents: `import {nativeAddon} from ${JSON.stringify(runtimeSpecifier)};export default nativeAddon(${JSON.stringify(target.specifier)},${JSON.stringify(target.origin)});`,
+                          loader: 'js',
+                        };
+                      });
                       build.onLoad({ filter: /\.[cm]?[jt]sx?$/ }, async (args) => {
                         if (skip(args.path)) return;
                         const code = await fs.readFile(args.path, 'utf8');
@@ -348,7 +367,7 @@ export function lumiana(options: LumianaPluginOptions = {}): Plugin {
         const resolved = path.isAbsolute(id)
           ? id
           : (await this.resolve(id, importer, { ...resolveOptions, skipSelf: true }))?.id;
-        if (resolved) return addonPrefix + addons.addon(resolved.split('?')[0]!);
+        if (resolved) return addonId(addons.addon(resolved.split('?')[0]!, importer), importer);
       }
       if (id === 'lumiana/client') return clientId;
       if (id === runtimeSpecifier) return runtimeId;
@@ -370,8 +389,10 @@ export function lumiana(options: LumianaPluginOptions = {}): Plugin {
       }
       if (id === runtimeId)
         return `export * from ${JSON.stringify(path.join(runtimeDir, 'browser.js'))};`;
-      if (id.startsWith(addonPrefix))
-        return `import {nativeAddon} from ${JSON.stringify(runtimeSpecifier)};export default nativeAddon(${JSON.stringify(id.slice(addonPrefix.length))});`;
+      if (id.startsWith(addonPrefix)) {
+        const target = addonTarget(id);
+        return `import {nativeAddon} from ${JSON.stringify(runtimeSpecifier)};export default nativeAddon(${JSON.stringify(target.specifier)},${JSON.stringify(target.origin)});`;
+      }
     },
     async transform(code, id, transformOptions) {
       if (transformOptions?.ssr || skip(id)) return;

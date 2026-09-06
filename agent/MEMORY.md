@@ -102,6 +102,10 @@ resuming work. Verify details against source and never store credentials or secr
   local identity domain.
 - PhreshOS startup was reduced from 28 synchronous calls to the two real filesystem decisions,
   `existsSync()` and `realpathSync()`. Its Unix-socket traffic uses WebSocket.
+- Native addon module loading materializes its behavioral property graph once, so exported methods
+  and their prototypes are local references rather than repeated reflection calls. The Sharp image
+  example was reduced from 14 synchronous requests to six: one addon load, four native calls, and
+  one callback continuation from `pipeline()`'s synchronous queue notification.
 - `process.env` serialization performs zero boundary calls. Large random fills are chunked around
   Web Crypto's 65,536-byte per-call limit.
 - CommonJS sources never receive ESM syntax. Connection runtime helpers use the private
