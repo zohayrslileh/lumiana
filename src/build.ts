@@ -1,5 +1,6 @@
 import fs from 'node:fs/promises';
 import path from 'node:path';
+import { createHash } from 'node:crypto';
 import { isBuiltin, createRequire } from 'node:module';
 import { parse } from '@babel/parser';
 import traverse from '@babel/traverse';
@@ -511,20 +512,30 @@ export async function transformSource(source: string, id: string, options: Trans
   let commonjs = false,
     usesProcess = false,
     usesTimers = false;
-  const runTasks: any[] = [];
-  const runTask = (p: any) => {
+  const boundaryTasks: Array<{
+    path: any;
+    kind: 'run' | 'worker' | 'sharedWorker';
+    ordinal: number;
+  }> = [];
+  let sharedWorkerOrdinal = 0;
+  const boundaryTask = (p: any) => {
     const call = p.parentPath;
     const callee = unwrapExpression(call?.node?.callee);
+    const kind = callee?.type === 'MemberExpression' ? staticKey(callee) : undefined;
     if (
       !call?.isCallExpression() ||
       call.node.arguments[0] !== p.node ||
       callee?.type !== 'MemberExpression' ||
-      staticKey(callee) !== 'run' ||
+      (kind !== 'run' && kind !== 'worker' && kind !== 'sharedWorker') ||
       callee.object.type !== 'Identifier' ||
       !lumianaBindings.has(call.scope.getBinding(callee.object.name))
     )
       return;
-    runTasks.push(p);
+    boundaryTasks.push({
+      path: p,
+      kind,
+      ordinal: kind === 'sharedWorker' ? sharedWorkerOrdinal++ : 0,
+    });
     p.skip();
   };
   traverse(ast as any, {
@@ -576,8 +587,8 @@ export async function transformSource(source: string, id: string, options: Trans
     ImportExpression(p: any) {
       if (p.node.source.type === 'StringLiteral') moduleNodes.push(p);
     },
-    ArrowFunctionExpression: runTask,
-    FunctionExpression: runTask,
+    ArrowFunctionExpression: boundaryTask,
+    FunctionExpression: boundaryTask,
     ReferencedIdentifier(p: any) {
       if (
         !esm &&
@@ -598,23 +609,23 @@ export async function transformSource(source: string, id: string, options: Trans
         globals.push(p);
     },
   });
-  for (const task of runTasks) {
+  for (const task of boundaryTasks) {
     const external = new Set<string>();
-    task.traverse({
+    task.path.traverse({
       ReferencedIdentifier(p: any) {
         const binding = p.scope.getBinding(p.node.name);
         if (!binding) return;
         const owner = binding.scope.path;
-        if (owner === task || owner.findParent((parent: any) => parent === task)) return;
+        if (owner === task.path || owner.findParent((parent: any) => parent === task.path)) return;
         external.add(p.node.name);
       },
     });
     const captures = [...external];
     if (captures.length)
       throw new Error(
-        `lumiana.run() tasks cannot capture browser bindings: ${captures.sort().join(', ')}. Pass them as arguments instead.`,
+        `lumiana.${task.kind}() functions cannot capture browser bindings: ${captures.sort().join(', ')}.`,
       );
-    const raw = source.slice(task.node.start, task.node.end);
+    const raw = source.slice(task.path.node.start, task.path.node.end);
     const physical = id.split('?')[0]!;
     const resolveDir = path.isAbsolute(physical)
       ? path.dirname(physical)
@@ -636,7 +647,7 @@ export async function transformSource(source: string, id: string, options: Trans
       legalComments: 'none',
       plugins: [
         {
-          name: 'lumiana-run-packages',
+          name: 'lumiana-worker-packages',
           setup(build) {
             build.onResolve({ filter: /.*/ }, (args) =>
               bare(args.path) || isBuiltin(args.path)
@@ -654,15 +665,24 @@ export async function transformSource(source: string, id: string, options: Trans
       for (const dependency of output.imports)
         if (bare(dependency.path) && !isBuiltin(dependency.path))
           await options.retainDependency?.(dependency.path);
-    edits.overwrite(
-      task.node.start,
-      task.node.end,
-      JSON.stringify({
-        __lumianaRun: true,
-        code: compiled.outputFiles![0]!.text,
-        filename: options.origin ?? id,
-      }),
-    );
+    const code = compiled.outputFiles![0]!.text;
+    const descriptor =
+      task.kind === 'run'
+        ? { __lumianaRun: true, code, filename: options.origin ?? id }
+        : task.kind === 'worker'
+          ? { __lumianaWorker: true, code, filename: options.origin ?? id }
+          : {
+              __lumianaSharedWorker: true,
+              code,
+              filename: options.origin ?? id,
+              identity:
+                'build:' +
+                createHash('sha256')
+                  .update(`${options.origin ?? id}\0${task.ordinal}`)
+                  .digest('hex'),
+              digest: createHash('sha256').update(code).digest('hex'),
+            };
+    edits.overwrite(task.path.node.start, task.path.node.end, JSON.stringify(descriptor));
     moduleSourceChanged = true;
   }
   for (const p of moduleNodes) {

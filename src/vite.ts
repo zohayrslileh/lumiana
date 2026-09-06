@@ -602,7 +602,7 @@ export function lumiana(options: LumianaPluginOptions = {}): Plugin {
       if (config.command !== 'build' || failed) return;
       const destination = path.join(deploymentDir, 'server');
       await fs.mkdir(destination, { recursive: true });
-      for (const name of ['host.js', 'worker.js', 'run-worker.js'])
+      for (const name of ['host.js', 'worker.js', 'run-worker.js', 'instance-worker.js'])
         await fs.copyFile(path.join(runtimeDir, name), path.join(destination, name));
       const dependencies = await addons.dependencies();
       let packageManager = 'npm';

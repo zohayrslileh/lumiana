@@ -63,6 +63,49 @@ test('run tasks are captured before browser transforms and reject lexical captur
   }
 });
 
+test('stateful worker initializers are captured and shared workers receive a stable identity', async () => {
+  const directory = await fs.mkdtemp(path.join(os.tmpdir(), 'lumiana-shared-build-'));
+  try {
+    await fs.writeFile(
+      path.join(directory, 'worker.ts'),
+      `let value = 0;
+       export const add = (amount: number) => value += amount;
+       export async function* changes() { yield value; }`,
+    );
+    const source = `import { lumiana } from 'lumiana/client';
+      export const open = () => lumiana.sharedWorker(() => import('./worker'));
+      export const isolated = () => lumiana.worker((initial: number) => ({ read: () => initial }), 7);`;
+    const options = {
+      origin: 'src/entry.ts',
+      sourceURL: pathToFileURL(path.join(directory, 'entry.ts')).href,
+      place: async () => ({}),
+    };
+    const first = await transformSource(source, path.join(directory, 'entry.ts'), options);
+    const second = await transformSource(source, path.join(directory, 'entry.ts'), options);
+    assert.match(first!.code, /__lumianaSharedWorker/);
+    assert.match(first!.code, /__lumianaWorker/);
+    assert.match(first!.code, /lumiana-shared-build/);
+    assert.doesNotMatch(first!.code, /import\(['"]\.\/worker['"]\)/);
+    assert.equal(
+      first!.code.match(/"identity":"([^"]+)"/)?.[1],
+      second!.code.match(/"identity":"([^"]+)"/)?.[1],
+    );
+
+    await assert.rejects(
+      transformSource(
+        `import { lumiana } from 'lumiana/client';
+         const browserValue = 1;
+         lumiana.sharedWorker(() => ({ read: () => browserValue }));`,
+        'src/entry.ts',
+        { place: async () => ({}) },
+      ),
+      /sharedWorker\(\) functions cannot capture browser bindings: browserValue/,
+    );
+  } finally {
+    await fs.rm(directory, { recursive: true, force: true });
+  }
+});
+
 test('unavailable CommonJS dependencies fail at the require call so package fallbacks work', async () => {
   const source = `let result;try { require('optional-addon'); } catch (error) { result = error.code; } module.exports = result;`;
   const transformed = await transformSource(source, 'optional.cjs', {

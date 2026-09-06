@@ -5,4 +5,6 @@ export type {
   Lumiana,
   RunResult,
   RemoteRunIterator,
+  WorkerInterface,
+  SharedWorkerInterface,
 } from './browser.js';

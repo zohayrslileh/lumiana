@@ -4,4 +4,5 @@ import { lumiana } from '../../dist/vite.js';
 export default defineConfig({
   root: fileURLToPath(new URL('.', import.meta.url)),
   plugins: [lumiana()],
+  build: { target: 'esnext' },
 });

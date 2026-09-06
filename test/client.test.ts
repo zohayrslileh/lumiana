@@ -500,6 +500,68 @@ test('client contract through real HTTP, binary WebSocket and an isolated native
     });
     assert.deepEqual(await cancelled.next(), { done: false, value: 0 });
     assert.deepEqual(await cancelled.return(), { done: true, value: undefined });
+    const initializeShared = async (initial: number) => {
+      const { threadId } = await import('node:worker_threads');
+      let total = initial;
+      let subscriptions = 0;
+      return {
+        add(amount: number) {
+          total += amount;
+          return { total, threadId, binary: Buffer.from([total, 255 - total]) };
+        },
+        current() {
+          return total;
+        },
+        unsupported() {
+          return () => total;
+        },
+        async *changes(count: number) {
+          for (let index = 0; index < count; index++) yield ++total;
+          return total;
+        },
+        async *watch() {
+          subscriptions++;
+          try {
+            for (let index = 0; ; index++) yield index;
+          } finally {
+            subscriptions--;
+          }
+        },
+        activeSubscriptions() {
+          return subscriptions;
+        },
+      };
+    };
+    const [shared, sameShared] = await Promise.all([
+      lumiana.sharedWorker(initializeShared, 0),
+      lumiana.sharedWorker(initializeShared, 100),
+    ]);
+    assert.equal(sameShared, shared, 'concurrent shared creation returns the same reference');
+    const added = await shared.add(2);
+    assert.equal(added.total, 2);
+    assert.ok(added.threadId > 0);
+    assert.deepEqual(added.binary, Buffer.from([2, 253]));
+    await assert.rejects(
+      shared.unsupported(),
+      /Cannot send a function across the Lumiana boundary/,
+    );
+    assert.equal(await (await lumiana.sharedWorker(initializeShared, 100)).current(), 2);
+    const changes = shared.changes(2);
+    assert.deepEqual(await changes.next(), { done: false, value: 3 });
+    assert.deepEqual(await changes.next(), { done: false, value: 4 });
+    assert.deepEqual(await changes.next(), { done: true, value: 4 });
+    const watched = shared.watch();
+    assert.deepEqual(await watched.next(), { done: false, value: 0 });
+    await watched.return();
+    assert.equal(await shared.activeSubscriptions(), 0);
+    const firstWorker = await lumiana.worker(initializeShared, 10);
+    const secondWorker = await lumiana.worker(initializeShared, 20);
+    assert.equal((await firstWorker.add(1)).total, 11);
+    assert.equal(await secondWorker.current(), 20, 'worker instances have independent state');
+    const workerChanges = firstWorker.changes(1);
+    assert.deepEqual(await workerChanges.next(), { done: false, value: 12 });
+    assert.deepEqual(await workerChanges.next(), { done: true, value: 12 });
+    await secondWorker.terminate();
     const before = browserRequests;
     const other = `http://127.0.0.1:${otherPort}`;
     assert.equal(await (await hybridFetch(other + '/cross')).text(), 'remote');
@@ -529,6 +591,11 @@ test('client contract through real HTTP, binary WebSocket and an isolated native
     lumiana.disconnect();
     assert.throws(() => browserOS.homedir(), /not connected/);
     assert.equal(await connect.credentials(creds), lumiana);
+    const reattached = await lumiana.sharedWorker(initializeShared, 999);
+    assert.equal(await reattached.current(), 4, 'shared worker state survives browser disconnect');
+    await assert.rejects(firstWorker.current(), /detached/);
+    await reattached.terminate();
+    await assert.rejects(reattached.current(), /detached/);
     lumiana.disconnect();
   } finally {
     globalThis.fetch = originalFetch;

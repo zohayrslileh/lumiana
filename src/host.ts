@@ -13,6 +13,7 @@ import type { Duplex } from 'node:stream';
 import type { Http2SecureServer } from 'node:http2';
 import { PREFIX, decodePacket, encodePacket, failure } from './protocol.js';
 import { encodeValue } from './values.js';
+import { WorkerRegistry } from './worker-registry.js';
 export interface HostOptions {
   root: string;
   username: string;
@@ -27,10 +28,12 @@ const equal = (actual: unknown, expected: string) => {
   return a.length === b.length && timingSafeEqual(a, b);
 };
 interface Session {
+  id: string;
   worker: Worker;
   signal: Int32Array;
   socket?: WebSocket;
   responses: Map<number, ServerResponse>;
+  workers: WorkerRegistry;
   stop(): Promise<void>;
   post(message: any): void;
 }
@@ -83,6 +86,16 @@ export function attachHost(server: Server | Http2SecureServer, options: HostOpti
     userInfo: os.userInfo(),
     version: os.version(),
   });
+  const deliver = (client: string, packet: any): void => {
+    const socket = sessions.get(client)?.socket;
+    if (socket?.readyState === WebSocket.OPEN) socket.send(encodePacket(packet));
+  };
+  const sharedWorkers = new WorkerRegistry(
+    options.root,
+    'shared',
+    (client) => sessions.has(client),
+    deliver,
+  );
   function respond(res: ServerResponse, packet: any, sync = false): void {
     if (res.destroyed || res.writableEnded) return;
     const bytes = Buffer.from(encodePacket(packet));
@@ -118,9 +131,16 @@ export function attachHost(server: Server | Http2SecureServer, options: HostOpti
     const startup = setTimeout(() => void session.stop(), 10_000);
     startup.unref();
     const session: Session = {
+      id,
       worker,
       signal,
       responses: new Map(),
+      workers: new WorkerRegistry(
+        options.root,
+        'session',
+        (client) => sessions.has(client),
+        deliver,
+      ),
       post(message) {
         worker.postMessage(message);
         Atomics.add(signal, 0, 1);
@@ -130,6 +150,8 @@ export function attachHost(server: Server | Http2SecureServer, options: HostOpti
         return (stopped ??= (async () => {
           sessions.delete(id);
           clearTimeout(startup);
+          sharedWorkers.detach(id);
+          await session.workers.close();
           for (const res of session.responses.values())
             respond(res, { ok: false, error: failure(new Error('Lumiana worker stopped')) }, true);
           session.responses.clear();
@@ -296,7 +318,11 @@ export function attachHost(server: Server | Http2SecureServer, options: HostOpti
           );
           if (packet.type === 'status')
             ws.send(encodePacket({ type: 'status', id: packet.id, value: encodeValue(status()) }));
-          else session.post(packet);
+          else if (
+            !sharedWorkers.handle(session.id, packet) &&
+            !session.workers.handle(session.id, packet)
+          )
+            session.post(packet);
         } catch (error) {
           ws.send(encodePacket({ type: 'fatal', error: failure(error) }));
           void session.stop();
@@ -315,6 +341,7 @@ export function attachHost(server: Server | Http2SecureServer, options: HostOpti
       closing = true;
       server.off('upgrade', upgrade);
       await Promise.all([...sessions.values()].map((s) => s.stop()));
+      await sharedWorkers.close();
       wss.close();
     },
   };

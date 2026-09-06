@@ -7,6 +7,7 @@ export default defineConfig({
     host: 'src/host.ts',
     worker: 'src/worker.ts',
     'run-worker': 'src/run-worker.ts',
+    'instance-worker': 'src/instance-worker.ts',
     'runtime/assert-strict': 'src/runtime/assert-strict.ts',
     'runtime/async-hooks': 'src/runtime/async-hooks.ts',
     'runtime/child-process': 'src/runtime/child-process.ts',

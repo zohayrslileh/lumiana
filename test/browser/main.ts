@@ -72,6 +72,37 @@ try {
     streamed.push(...item.value);
   }
   check('run streams generator output in order', streamed.join(',') === '1,2,3,4,5');
+  const openShared = () => lumiana.sharedWorker(() => import('./stateful-worker'));
+  const shared = await openShared();
+  const sharedValue = await shared.add(2);
+  check(
+    'shared worker methods preserve state and binary values',
+    sharedValue.total === 2 && sharedValue.binary.join(',') === '2,253',
+  );
+  const changes = shared.changes(2);
+  const sharedChanges = [await changes.next(), await changes.next(), await changes.next()];
+  check(
+    'shared worker generators stream subscriptions',
+    sharedChanges[0].value === 3 &&
+      sharedChanges[1].value === 4 &&
+      sharedChanges[2].done === true &&
+      sharedChanges[2].value === 4,
+  );
+  const watched = shared.watch();
+  await watched.next();
+  await watched.return();
+  check(
+    'ending iteration cancels only its subscription',
+    (await shared.activeSubscriptions()) === 0,
+  );
+  const firstWorker = await lumiana.worker(() => import('./stateful-worker'));
+  const secondWorker = await lumiana.worker(() => import('./stateful-worker'));
+  await firstWorker.add(5);
+  check(
+    'worker creates independent instances with the shared interface',
+    (await firstWorker.current()) === 5 && (await secondWorker.current()) === 0,
+  );
+  await secondWorker.terminate();
   const binary = new Uint8Array(200_000).map((_, i) => i % 256);
   const os = await import('node:os'),
     path = await import('node:path');
@@ -118,6 +149,16 @@ try {
     'reconnection returns the same browser instance',
     (await connect.credentials({ username: 'lumiana', password: 'lumiana' })) === lumiana,
   );
+  const reattached = await openShared();
+  check('shared worker survives browser reconnection', (await reattached.current()) === 4);
+  let workerDetached = false;
+  try {
+    await firstWorker.current();
+  } catch {
+    workerDetached = true;
+  }
+  check('worker ends with its creating session', workerDetached);
+  await reattached.terminate();
   lumiana.disconnect();
   output.textContent = JSON.stringify({ success: true, checks }, null, 2);
 } catch (error) {

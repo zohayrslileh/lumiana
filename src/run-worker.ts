@@ -1,61 +1,14 @@
-import vm from 'node:vm';
-import path from 'node:path';
-import { createRequire } from 'node:module';
-import { fileURLToPath, pathToFileURL } from 'node:url';
 import { parentPort, workerData } from 'node:worker_threads';
-import { resolve as resolveImport } from 'import-meta-resolve';
-import { failure } from './protocol.js';
 import { decodeValue, encodeException, encodeValue } from './values.js';
+import { createWorkerContext } from './worker-context.js';
 
 if (!parentPort) throw new Error('A Lumiana task requires a worker thread');
 const port = parentPort;
 
 const descriptor = workerData.task as { code: string; filename: string };
-const filename = descriptor.filename.startsWith('file:')
-  ? fileURLToPath(descriptor.filename)
-  : path.resolve(workerData.root, descriptor.filename || 'lumiana.run.js');
-const require = createRequire(filename);
-const loadModule = new Function(
-  'specifier',
-  'attributes',
-  'return import(specifier, attributes ? { with: attributes } : undefined)',
-) as (specifier: string, attributes?: Record<string, string>) => Promise<any>;
-const module = { exports: {} as any };
-const taskConsole: Record<string, (...values: unknown[]) => void> = {};
-for (const level of ['log', 'info', 'warn', 'error', 'debug', 'trace'] as const)
-  taskConsole[level] = (...values: unknown[]) =>
-    port.postMessage({
-      type: 'console',
-      level,
-      values: values.map((value) => {
-        try {
-          return encodeValue(value);
-        } catch {
-          return encodeValue(String(value));
-        }
-      }),
-      errors: values.map((value) =>
-        value instanceof Error ||
-        (typeof value === 'object' &&
-          value !== null &&
-          Object.prototype.toString.call(value) === '[object Error]')
-          ? failure(value)
-          : null,
-      ),
-    });
-
-const sandbox: Record<string, any> = {
-  Buffer,
-  console: taskConsole,
-  process,
-  module,
-  exports: module.exports,
-  require,
-  __filename: filename,
-  __dirname: path.dirname(filename),
-};
-sandbox.global = sandbox;
-const context = vm.createContext(sandbox, { name: `lumiana.run:${filename}` });
+const context = createWorkerContext(descriptor, workerData.root, 'run', (packet) =>
+  port.postMessage(packet),
+);
 
 let credit = 0;
 let cancelled = false;
@@ -108,20 +61,10 @@ async function stream(value: any): Promise<void> {
 
 async function execute(): Promise<void> {
   try {
-    new vm.Script(descriptor.code, {
-      filename,
-      importModuleDynamically: async (specifier, _script, attributes) => {
-        const resolved = resolveImport(specifier, pathToFileURL(filename).href);
-        const values = Object.fromEntries(
-          Object.entries(attributes).filter((entry): entry is [string, string] => !!entry[1]),
-        );
-        return loadModule(resolved, Object.keys(values).length ? values : undefined);
-      },
-    }).runInContext(context);
-    if (typeof module.exports !== 'function')
-      throw new TypeError('lumiana.run() requires a function');
+    const task = context.load();
+    if (typeof task !== 'function') throw new TypeError('lumiana.run() requires a function');
     const args = (workerData.args as any[]).map(decodeValue);
-    const value: any = await Reflect.apply(module.exports, undefined, args);
+    const value: any = await Reflect.apply(task, undefined, args);
     if (
       value &&
       typeof value.next === 'function' &&

@@ -49,13 +49,40 @@ export type RunResult<T> =
       : T;
 export interface RemoteRunIterator<Yield, Return = void>
   extends AsyncIterator<Yield, Return, undefined>, AsyncIterable<Yield> {}
+export type WorkerInterface<Exports> = {
+  [
+    Key in keyof Exports as Exports[Key] extends (...args: any[]) => any ? Key : never
+  ]: Exports[Key] extends (
+    ...args: infer Arguments
+  ) => AsyncGenerator<infer Yield, infer Return, any>
+    ? (...args: Arguments) => RemoteRunIterator<Awaited<Yield>, Awaited<Return>>
+    : Exports[Key] extends (...args: infer Arguments) => Generator<infer Yield, infer Return, any>
+      ? (...args: Arguments) => RemoteRunIterator<Awaited<Yield>, Awaited<Return>>
+      : Exports[Key] extends (...args: infer Arguments) => infer Result
+        ? (...args: Arguments) => Promise<Awaited<Result>>
+        : never;
+} & { terminate(): Promise<void> };
+export type SharedWorkerInterface<Exports> = WorkerInterface<Exports>;
 export interface Lumiana {
   status(): Promise<ServerStatus>;
   run<Arguments extends unknown[], Result>(
     task: (...args: Arguments) => Result,
     ...args: Arguments
   ): Promise<RunResult<Awaited<Result>>>;
+  sharedWorker<Arguments extends unknown[], Exports extends object>(
+    initialize: (...args: Arguments) => Exports | Promise<Exports>,
+    ...args: Arguments
+  ): Promise<SharedWorkerInterface<Awaited<Exports>>>;
+  worker<Arguments extends unknown[], Exports extends object>(
+    initialize: (...args: Arguments) => Exports | Promise<Exports>,
+    ...args: Arguments
+  ): Promise<WorkerInterface<Awaited<Exports>>>;
   disconnect(): void;
+}
+interface WorkerProxyState {
+  identity: string;
+  active: boolean;
+  value: object;
 }
 interface Connection {
   socket: WebSocket;
@@ -71,7 +98,10 @@ interface Connection {
     values: Map<number, any>;
     handles: Map<any, number>;
   };
-  runs: Map<number, RunIterator<any, any>>;
+  runs: Map<number, RemoteIterator<any, any>>;
+  workerSubscriptions: Map<number, { identity: string; iterator: RemoteIterator<any, any> }>;
+  workerInstances: Map<string, WorkerProxyState>;
+  sharedWorkerOpenings: Map<string, Promise<any>>;
 }
 interface Context {
   instance: Lumiana;
@@ -86,7 +116,7 @@ interface Context {
 const singletonKey = Symbol.for('lumiana.context');
 const global = globalThis as any;
 
-class RunIterator<Yield, Return> implements RemoteRunIterator<Yield, Return> {
+class RemoteIterator<Yield, Return> implements RemoteRunIterator<Yield, Return> {
   private queue: Array<
     { result: IteratorResult<Yield, Return>; error?: never } | { result?: never; error: unknown }
   > = [];
@@ -99,9 +129,15 @@ class RunIterator<Yield, Return> implements RemoteRunIterator<Yield, Return> {
 
   constructor(
     private owner: Connection,
-    private handle: number,
-  ) {
+    private label: string,
+    private release: () => boolean,
+    private sendCredit: (count: number) => void,
+    private sendCancel: () => void,
+  ) {}
+
+  start(): this {
     this.credit(16);
+    return this;
   }
 
   [Symbol.asyncIterator](): AsyncIterableIterator<Yield> {
@@ -110,7 +146,9 @@ class RunIterator<Yield, Return> implements RemoteRunIterator<Yield, Return> {
 
   next(value?: undefined): Promise<IteratorResult<Yield, Return>> {
     if (value !== undefined)
-      return Promise.reject(new TypeError('A Lumiana run stream does not accept iterator input'));
+      return Promise.reject(
+        new TypeError(`A Lumiana ${this.label} does not accept iterator input`),
+      );
     const queued = this.queue.shift();
     if (queued) {
       this.replenish();
@@ -121,13 +159,9 @@ class RunIterator<Yield, Return> implements RemoteRunIterator<Yield, Return> {
   }
 
   return(value?: Return): Promise<IteratorResult<Yield, Return>> {
-    const active = this.owner.runs.has(this.handle);
+    const active = this.release();
     this.ended = true;
-    if (active) {
-      this.owner.runs.delete(this.handle);
-      if (this.owner.socket.readyState === 1)
-        send(this.owner, { type: 'run-cancel', handle: this.handle });
-    }
+    if (active && this.owner.socket.readyState === 1) this.sendCancel();
     for (const waiter of this.waiting) waiter.resolve({ done: true, value: value as Return });
     this.waiting.length = 0;
     this.queue.length = 0;
@@ -143,7 +177,7 @@ class RunIterator<Yield, Return> implements RemoteRunIterator<Yield, Return> {
     if (this.ended) return;
     if (packet.event === 'error') {
       this.ended = true;
-      this.owner.runs.delete(this.handle);
+      this.release();
       const error = decodeException(packet.error);
       const waiter = this.waiting.shift();
       if (waiter) waiter.reject(error);
@@ -160,7 +194,7 @@ class RunIterator<Yield, Return> implements RemoteRunIterator<Yield, Return> {
         : { done: false, value: decodeValue(packet.value) };
     if (result.done) {
       this.ended = true;
-      this.owner.runs.delete(this.handle);
+      this.release();
     }
     const waiter = this.waiting.shift();
     if (waiter) waiter.resolve(result);
@@ -176,7 +210,7 @@ class RunIterator<Yield, Return> implements RemoteRunIterator<Yield, Return> {
   fail(error: unknown): void {
     if (this.ended) return;
     this.ended = true;
-    this.owner.runs.delete(this.handle);
+    this.release();
     for (const waiter of this.waiting) waiter.reject(error);
     this.waiting.length = 0;
     this.queue.length = 0;
@@ -190,7 +224,133 @@ class RunIterator<Yield, Return> implements RemoteRunIterator<Yield, Return> {
 
   private credit(count: number): void {
     this.outstanding += count;
-    send(this.owner, { type: 'run-credit', handle: this.handle, count });
+    this.sendCredit(count);
+  }
+}
+
+async function hashSource(source: string): Promise<string> {
+  const digest = await globalThis.crypto.subtle.digest('SHA-256', new TextEncoder().encode(source));
+  return [...new Uint8Array(digest)].map((value) => value.toString(16).padStart(2, '0')).join('');
+}
+
+async function openWorker(
+  c: Connection,
+  kind: 'shared' | 'worker',
+  initialize: any,
+  args: any[],
+): Promise<any> {
+  let descriptor = initialize;
+  const transformed =
+    kind === 'shared' ? descriptor?.__lumianaSharedWorker : descriptor?.__lumianaWorker;
+  if (!transformed) {
+    if (typeof initialize !== 'function')
+      throw new TypeError(
+        `lumiana.${kind === 'shared' ? 'sharedWorker' : 'worker'}() requires an initializer function`,
+      );
+    const source = Function.prototype.toString.call(initialize);
+    if (/\[native code\]/.test(source))
+      throw new TypeError(
+        `lumiana.${kind === 'shared' ? 'sharedWorker' : 'worker'}() cannot execute a native or bound function`,
+      );
+    const digest = await hashSource(source);
+    descriptor = {
+      ...(kind === 'shared' ? { __lumianaSharedWorker: true } : { __lumianaWorker: true }),
+      code: `module.exports = (${source});`,
+      filename: state.moduleRoot.replace(/\/$/, '') + '/lumiana.worker.js',
+      ...(kind === 'shared' ? { identity: `runtime:${digest}`, digest } : {}),
+    };
+  }
+  const encodedArguments = args.map(encodeValue);
+  const cached = kind === 'shared' ? c.workerInstances.get(descriptor.identity) : undefined;
+  if (cached?.active) return cached.value;
+  const create = async () => {
+    const opened = await request(c, {
+      type: `${kind}-open`,
+      descriptor,
+      args: encodedArguments,
+    });
+    const instance: Record<string, Function> = Object.create(null);
+    const proxyState: WorkerProxyState = {
+      identity: opened.identity,
+      active: true,
+      value: instance,
+    };
+    const assertActive = () => {
+      if (!proxyState.active || state.connection !== c || c.socket.readyState !== 1)
+        throw new Error('Lumiana worker is detached');
+    };
+    for (const method of opened.methods) {
+      Object.defineProperty(instance, method.name, {
+        enumerable: true,
+        value:
+          method.kind === 'subscription'
+            ? (...args: any[]) => {
+                assertActive();
+                const subscription = ++c.sequence;
+                send(c, {
+                  type: `${kind}-subscribe`,
+                  identity: opened.identity,
+                  subscription,
+                  method: method.name,
+                  args: args.map(encodeValue),
+                });
+                const iterator = new RemoteIterator(
+                  c,
+                  'worker subscription',
+                  () => c.workerSubscriptions.delete(subscription),
+                  (count) =>
+                    send(c, {
+                      type: `${kind}-credit`,
+                      identity: opened.identity,
+                      subscription,
+                      count,
+                    }),
+                  () =>
+                    send(c, {
+                      type: `${kind}-cancel`,
+                      identity: opened.identity,
+                      subscription,
+                    }),
+                );
+                c.workerSubscriptions.set(subscription, {
+                  identity: opened.identity,
+                  iterator,
+                });
+                return iterator.start();
+              }
+            : async (...args: any[]) => {
+                assertActive();
+                return request(c, {
+                  type: `${kind}-call`,
+                  identity: opened.identity,
+                  method: method.name,
+                  args: args.map(encodeValue),
+                });
+              },
+      });
+    }
+    Object.defineProperty(instance, 'terminate', {
+      value: async () => {
+        assertActive();
+        await request(c, { type: `${kind}-terminate`, identity: opened.identity });
+        proxyState.active = false;
+        c.workerInstances.delete(opened.identity);
+      },
+    });
+    Object.freeze(instance);
+    proxyState.value = instance;
+    c.workerInstances.set(opened.identity, proxyState);
+    return instance;
+  };
+  if (kind === 'worker') return create();
+  const opening = c.sharedWorkerOpenings.get(descriptor.identity);
+  if (opening) return opening;
+  const promise = create();
+  c.sharedWorkerOpenings.set(descriptor.identity, promise);
+  try {
+    return await promise;
+  } finally {
+    c.sharedWorkerOpenings.delete(descriptor.identity);
   }
 }
 
@@ -235,9 +395,23 @@ const state: Context = (global[singletonKey] ??= {
         }
         const value = await invoke(c, 'run', descriptor, ...args);
         if (!value?.__lumianaRunStream) return value;
-        const iterator = new RunIterator(c, value.__lumianaRunStream);
-        c.runs.set(value.__lumianaRunStream, iterator);
+        const handle = value.__lumianaRunStream;
+        const iterator = new RemoteIterator(
+          c,
+          'run stream',
+          () => c.runs.delete(handle),
+          (count) => send(c, { type: 'run-credit', handle, count }),
+          () => send(c, { type: 'run-cancel', handle }),
+        );
+        c.runs.set(handle, iterator);
+        iterator.start();
         return iterator;
+      },
+      async sharedWorker(initialize: any, ...args: any[]): Promise<any> {
+        return openWorker(connection(), 'shared', initialize, args);
+      },
+      async worker(initialize: any, ...args: any[]): Promise<any> {
+        return openWorker(connection(), 'worker', initialize, args);
       },
       disconnect(): void {
         const c = connection();
@@ -302,6 +476,13 @@ function send(c: Connection, packet: any): void {
   if (c.socket.readyState !== 1) throw new Error('Lumiana is disconnected');
   c.socket.send(encodePacket(packet) as Uint8Array<ArrayBuffer>);
 }
+function request(c: Connection, packet: any): Promise<any> {
+  const id = ++c.sequence;
+  return new Promise((resolve, reject) => {
+    c.pending.set(id, { resolve, reject });
+    send(c, { ...packet, id });
+  });
+}
 function close(c: Connection, error = new Error('Lumiana is disconnected')): void {
   if (state.connection === c) state.connection = undefined;
   clearOS();
@@ -310,6 +491,11 @@ function close(c: Connection, error = new Error('Lumiana is disconnected')): voi
   c.pending.clear();
   for (const iterator of c.runs.values()) iterator.fail(error);
   c.runs.clear();
+  for (const subscription of c.workerSubscriptions.values()) subscription.iterator.fail(error);
+  c.workerSubscriptions.clear();
+  for (const shared of c.workerInstances.values()) shared.active = false;
+  c.workerInstances.clear();
+  c.sharedWorkerOpenings.clear();
   c.addons.values.clear();
   c.callbacks.clear();
 }
@@ -452,6 +638,9 @@ export const connect = {
           handles: new Map(),
         },
         runs: new Map(),
+        workerSubscriptions: new Map(),
+        workerInstances: new Map(),
+        sharedWorkerOpenings: new Map(),
       };
       await new Promise<void>((resolve, reject) => {
         socket.onmessage = (event) => {
@@ -487,6 +676,32 @@ export const connect = {
             }
             if (packet.type === 'run-event') {
               c.runs.get(packet.handle)?.receive(packet);
+              return;
+            }
+            if (packet.type === 'subscription-event') {
+              c.workerSubscriptions.get(packet.subscription)?.iterator.receive(packet);
+              return;
+            }
+            if (packet.type === 'shared-stopped' || packet.type === 'worker-stopped') {
+              const error = decodeException(packet.error);
+              if (packet.fatal) {
+                console.error(error);
+                if (typeof ErrorEvent === 'function')
+                  globalThis.dispatchEvent(
+                    new ErrorEvent('error', {
+                      error,
+                      message: error instanceof Error ? error.message : String(error),
+                    }),
+                  );
+              }
+              const instance = c.workerInstances.get(packet.identity);
+              if (instance) instance.active = false;
+              c.workerInstances.delete(packet.identity);
+              for (const [id, subscription] of c.workerSubscriptions)
+                if (subscription.identity === packet.identity) {
+                  subscription.iterator.fail(error);
+                  c.workerSubscriptions.delete(id);
+                }
               return;
             }
             if (packet.type === 'callback') {
