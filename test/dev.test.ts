@@ -4,6 +4,7 @@ import fs from 'node:fs/promises';
 import path from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { createServer } from 'vite';
+import { init, parse } from 'es-module-lexer';
 import { lumiana } from '../dist/vite.js';
 
 test(
@@ -40,6 +41,18 @@ test(
           for (const name of ['browser.js', 'runtime/fs.js', 'runtime/filesystem.js']) {
             const response = await request(runtime(name));
             const code = await response.text();
+            await init;
+            for (const dependency of parse(code)[0]) {
+              if (!dependency.n?.startsWith('/@fs/') || !dependency.n.includes('/node_modules/'))
+                continue;
+              const imported = await request(origin + dependency.n);
+              assert.equal(imported.status, 200, dependency.n);
+              const source = await imported.text();
+              assert.ok(
+                parse(source)[1].length > 0,
+                `Dependency served without ESM exports: ${dependency.n}`,
+              );
+            }
             for (const [, dependency] of code.matchAll(/from ["'](\/node_modules\/[^"']+)["']/g)) {
               const bundled = await request(origin + dependency);
               assert.equal(bundled.status, 200, dependency);

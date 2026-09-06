@@ -383,7 +383,13 @@ export function lumiana(options: LumianaPluginOptions = {}): Plugin {
       if (id === runtimeId) return id;
       if (importer && (await usesNodeEnvironment(importer))) {
         const resolved = await resolveNode(id, importer);
-        if (resolved) return nodeContract(resolved);
+        if (resolved) {
+          nodeContract(resolved);
+          // Raw resolution establishes the execution environment. When both
+          // environments select the same file, Vite still owns serving it,
+          // including dependency optimization and CommonJS interoperability.
+          if (resolved !== (await resolveBrowser(id, importer))) return resolved;
+        }
       }
     },
     load(id) {

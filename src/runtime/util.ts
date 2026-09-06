@@ -107,6 +107,7 @@ const runtime = Object.assign({}, browserUtil, {
   TextDecoder,
   TextEncoder,
   formatWithOptions,
+  inherits,
   promisify,
   stripVTControlCharacters,
   toUSVString,

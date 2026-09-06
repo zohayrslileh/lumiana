@@ -15,7 +15,7 @@ import { createRequire } from '../src/runtime/module.js';
 import crypto from '../src/runtime/crypto.js';
 import zlib from '../src/runtime/zlib.js';
 import * as runtimeURL from '../src/runtime/url.js';
-import runtimeUtil from '../src/runtime/util.js';
+import runtimeUtil, { inherits } from '../src/runtime/util.js';
 import workerThreads from '../src/runtime/worker-threads.js';
 import runtimeTTY from '../src/runtime/tty.js';
 import { dispatchKernel, installKernel, removeKernel } from '../src/runtime/bridge.js';
@@ -48,6 +48,7 @@ test('promisify honors the process-wide Node custom implementation contract', as
 });
 
 test('util inheritance is available without depending on its own compatibility module', () => {
+  assert.equal(runtimeUtil.inherits, inherits);
   function Parent(this: any) {}
   Parent.prototype.read = () => 42;
   function Child(this: any) {}
