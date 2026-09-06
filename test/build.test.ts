@@ -158,11 +158,14 @@ test('dependency environment probes remain owned by Vite and the browser', async
       nodeGlobals: false,
     },
   );
-  assert.equal(
-    globalAlias?.code,
-    'module.exports = globalThis.crypto && globalThis.queueMicrotask;',
-    'an unbound Node global alias is local browser syntax, regardless of package conditions',
-  );
+  assert.match(globalAlias!.code, /nodeGlobal:__lumiana/);
+  assert.match(globalAlias!.code, /globalThis\[Symbol\.for\("lumiana\.runtime"\)\]/);
+  const realm = { crypto: {}, queueMicrotask() {} };
+  const module = { exports: undefined };
+  new Function('module', 'globalThis', globalAlias!.code)(module, {
+    [Symbol.for('lumiana.runtime')]: { nodeGlobal: realm },
+  });
+  assert.equal(module.exports, realm.queueMicrotask);
 
   const concreteGlobals = await transformSource(
     'export const input = value => Buffer.isBuffer(value);export const here=__filename;',

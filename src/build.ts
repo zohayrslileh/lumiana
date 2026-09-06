@@ -255,7 +255,6 @@ export async function transformSource(source: string, id: string, options: Trans
   const contextualCalls: any[] = [];
   let moduleLocationChanged = false;
   let moduleSourceChanged = false;
-  let globalAliasChanged = false;
   let counter = 0;
   const reserved = new Set<string>();
   traverse(ast as any, {
@@ -306,7 +305,8 @@ export async function transformSource(source: string, id: string, options: Trans
     clearImmediateName = name(),
     filenameName = name(),
     dirnameName = name(),
-    addonName = name();
+    addonName = name(),
+    globalName = name();
   const used = new Set<string>();
   const esm = ast.program.body.some(
     (node) => node.type.startsWith('Import') || node.type.startsWith('Export'),
@@ -551,8 +551,8 @@ export async function transformSource(source: string, id: string, options: Trans
       usesProcess = true;
       replacement = processName;
     } else if (n.name === 'global') {
-      replacement = 'globalThis';
-      globalAliasChanged = true;
+      used.add('nodeGlobal');
+      replacement = globalName;
     } else if (n.name === 'setImmediate') {
       usesTimers = true;
       replacement = immediateName;
@@ -572,14 +572,7 @@ export async function transformSource(source: string, id: string, options: Trans
       replacement = `${n.name}: ${replacement}`;
     edits.overwrite(n.start, n.end, replacement);
   }
-  if (
-    !used.size &&
-    !usesProcess &&
-    !usesTimers &&
-    !globalAliasChanged &&
-    !moduleLocationChanged &&
-    !moduleSourceChanged
-  )
+  if (!used.size && !usesProcess && !usesTimers && !moduleLocationChanged && !moduleSourceChanged)
     return null;
   const names: Record<string, string> = {
     hybridFetch: fetchName,
@@ -588,6 +581,7 @@ export async function transformSource(source: string, id: string, options: Trans
     moduleDirname: dirnameName,
     moduleFilename: filenameName,
     nativeAddon: addonName,
+    nodeGlobal: globalName,
   };
   const commonRuntime = 'globalThis[Symbol.for("lumiana.runtime")]';
   if (usesProcess)

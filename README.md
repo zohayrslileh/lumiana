@@ -181,6 +181,11 @@ Explicit `window.fetch` and `window.WebSocket` always retain their browser imple
 Functions imported from a Node library retain that library's implementation. Locally declared
 bindings named `fetch` or `WebSocket` are not transformed.
 
+The browser runtime supplies `global`, `process`, `Buffer`, `setImmediate`, and `clearImmediate`
+when the realm does not already provide them. `global` identifies the same realm as `globalThis`,
+so computed properties, destructuring, and aliases can access these capabilities too. Existing
+global properties retain their values.
+
 ## Values and capabilities
 
 JavaScript objects, functions, classes, callbacks, streams, and events stay in the browser. Values

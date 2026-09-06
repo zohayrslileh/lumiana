@@ -9,6 +9,7 @@ import {
   removeKernel,
 } from './runtime/bridge.js';
 import processRuntime, { initializeProcess } from './runtime/process.js';
+import { installGlobals } from './runtime/globals.js';
 import { clearOS, initializeOS } from './runtime/os.js';
 import { initializePerformance } from './runtime/perf-hooks.js';
 import {
@@ -673,6 +674,14 @@ export function moduleDirname(origin: string): string {
 
 // CommonJS cannot contain ESM imports. The Vite transform reads these internal
 // capabilities from the browser context after the client bootstrap has loaded.
+export const nodeGlobal = installGlobals(globalThis, {
+  global: globalThis,
+  process: processRuntime,
+  Buffer,
+  setImmediate: localSetImmediate,
+  clearImmediate: localClearImmediate,
+});
+
 Object.assign((global[Symbol.for('lumiana.runtime')] ??= Object.create(null)), {
   Buffer,
   HybridWebSocket,
@@ -681,6 +690,7 @@ Object.assign((global[Symbol.for('lumiana.runtime')] ??= Object.create(null)), {
   moduleDirname,
   moduleFilename,
   nativeAddon,
+  nodeGlobal,
   process: processRuntime,
   setImmediate: localSetImmediate,
 });

@@ -5,6 +5,10 @@ import os from 'node:os';
 import path from 'node:path';
 import { Buffer } from 'buffer';
 import { once } from 'node:events';
+import { createContext, runInContext } from 'node:vm';
+import { installGlobals } from '../src/runtime/globals.js';
+import processRuntime from '../src/runtime/process.js';
+import { setImmediate, clearImmediate } from '../src/runtime/timers.js';
 import { FileKernel } from '../src/kernel/files.js';
 import { NetworkKernel } from '../src/kernel/network.js';
 import { HttpKernel } from '../src/kernel/http.js';
@@ -19,6 +23,24 @@ import runtimeUtil, { inherits } from '../src/runtime/util.js';
 import workerThreads from '../src/runtime/worker-threads.js';
 import runtimeTTY from '../src/runtime/tty.js';
 import { dispatchKernel, installKernel, removeKernel } from '../src/runtime/bridge.js';
+
+test('Node global capabilities are available through the realm and its aliases', () => {
+  const context = createContext({ native: true });
+  const realm = runInContext('globalThis', context);
+  const bindings = { global: realm, process: processRuntime, Buffer, setImmediate, clearImmediate };
+  assert.equal(installGlobals(realm, bindings), realm);
+  assert.equal(runInContext('global.process', context), processRuntime);
+  assert.equal(runInContext('const alias = global; alias["process"]', context), processRuntime);
+  assert.equal(runInContext('global.global === globalThis', context), true);
+  assert.equal(runInContext('global.Buffer.from("hello").toString()', context), 'hello');
+  assert.equal(runInContext('global.setImmediate', context), setImmediate);
+  assert.equal(runInContext('global.clearImmediate', context), clearImmediate);
+  // Accessing an absent standard stream is a valid comparison, not a missing process object.
+  assert.equal(runInContext('global.process.stdout === undefined', context), true);
+  installGlobals(realm, { process: {}, native: false });
+  assert.equal(realm.process, processRuntime);
+  assert.equal(realm.native, true, 'existing realm capabilities retain their identity');
+});
 
 test('createRequire keeps portable CommonJS constructors local', () => {
   const require = createRequire(import.meta.url, 'test/runtime.test.ts');

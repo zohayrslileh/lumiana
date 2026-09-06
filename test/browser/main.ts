@@ -9,6 +9,21 @@ const check = (name: string, condition: boolean) => {
 const nativeFetch = window.fetch,
   nativeSocket = window.WebSocket;
 try {
+  const processModule = await import('node:process');
+  const bufferModule = await import('node:buffer');
+  const alias = global;
+  const key = 'process';
+  check(
+    'global and globalThis identify the browser realm',
+    alias === globalThis && alias.global === alias,
+  );
+  check('global process is the local Node process', alias[key] === processModule.default);
+  check('global Buffer is the local Node Buffer', alias.Buffer === bufferModule.Buffer);
+  check(
+    'global timer capabilities are callable',
+    typeof alias.setImmediate === 'function' && typeof alias.clearImmediate === 'function',
+  );
+  check('global browser methods retain their receiver', alias.atob('b2s=') === 'ok');
   let threw = false;
   const fs = await import('node:fs/promises');
   try {
