@@ -324,6 +324,8 @@ export function lumiana(options: LumianaPluginOptions = {}): Plugin {
                         locateAddon: (request, computed) =>
                           addons.locate(request, id.split('?')[0]!, computed),
                         retainPackage: () => addons.retain(id.split('?')[0]!),
+                        retainDependency: (request) =>
+                          addons.retainRequest(request, id.split('?')[0]!),
                         nodeGlobals: !dependencyModule(id) || (await usesNodeEnvironment(id)),
                       });
                     },
@@ -422,6 +424,7 @@ export function lumiana(options: LumianaPluginOptions = {}): Plugin {
                           locateAddon: (request, computed) =>
                             addons.locate(request, args.path, computed),
                           retainPackage: () => addons.retain(args.path),
+                          retainDependency: (request) => addons.retainRequest(request, args.path),
                           nodeGlobals:
                             !dependencyModule(args.path) || (await usesNodeEnvironment(args.path)),
                         });
@@ -555,6 +558,7 @@ export function lumiana(options: LumianaPluginOptions = {}): Plugin {
         client: runtimeSpecifier,
         locateAddon: (request, computed) => addons.locate(request, id.split('?')[0]!, computed),
         retainPackage: () => addons.retain(id.split('?')[0]!),
+        retainDependency: (request) => addons.retainRequest(request, id.split('?')[0]!),
         nodeGlobals: !dependencyModule(id) || (await usesNodeEnvironment(id)),
         place: (specifier, required, kind) =>
           placeModule(
@@ -598,7 +602,7 @@ export function lumiana(options: LumianaPluginOptions = {}): Plugin {
       if (config.command !== 'build' || failed) return;
       const destination = path.join(deploymentDir, 'server');
       await fs.mkdir(destination, { recursive: true });
-      for (const name of ['host.js', 'worker.js'])
+      for (const name of ['host.js', 'worker.js', 'run-worker.js'])
         await fs.copyFile(path.join(runtimeDir, name), path.join(destination, name));
       const dependencies = await addons.dependencies();
       await fs.writeFile(

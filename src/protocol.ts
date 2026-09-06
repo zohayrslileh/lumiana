@@ -28,14 +28,20 @@ export interface Failure {
   thrown?: Graph;
 }
 export function failure(error: unknown): Failure {
-  if (!(error instanceof Error)) return { name: 'Error', message: String(error) };
+  const errorLike =
+    error instanceof Error ||
+    (typeof error === 'object' &&
+      error !== null &&
+      Object.prototype.toString.call(error) === '[object Error]');
+  if (!errorLike) return { name: 'Error', message: String(error) };
+  const value = error as Error;
   const properties: Record<string, unknown> = {};
-  for (const key of Object.keys(error)) {
-    const value = (error as any)[key];
-    if (value === null || ['string', 'number', 'boolean'].includes(typeof value))
-      properties[key] = value;
+  for (const key of Object.keys(value)) {
+    const property = (value as any)[key];
+    if (property === null || ['string', 'number', 'boolean'].includes(typeof property))
+      properties[key] = property;
   }
-  return { name: error.name, message: error.message, stack: error.stack, properties };
+  return { name: value.name, message: value.message, stack: value.stack, properties };
 }
 export function restoreError(info: Failure): Error {
   const constructors: Record<string, new (message: string) => Error> = {

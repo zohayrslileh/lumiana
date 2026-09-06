@@ -41,8 +41,20 @@ export interface ServerStatus {
     arrayBuffers: number;
   };
 }
+export type RunResult<T> =
+  T extends AsyncGenerator<infer Yield, infer Return, any>
+    ? RemoteRunIterator<Awaited<Yield>, Awaited<Return>>
+    : T extends Generator<infer Yield, infer Return, any>
+      ? RemoteRunIterator<Awaited<Yield>, Awaited<Return>>
+      : T;
+export interface RemoteRunIterator<Yield, Return = void>
+  extends AsyncIterator<Yield, Return, undefined>, AsyncIterable<Yield> {}
 export interface Lumiana {
   status(): Promise<ServerStatus>;
+  run<Arguments extends unknown[], Result>(
+    task: (...args: Arguments) => Result,
+    ...args: Arguments
+  ): Promise<RunResult<Awaited<Result>>>;
   disconnect(): void;
 }
 interface Connection {
@@ -59,6 +71,7 @@ interface Connection {
     values: Map<number, any>;
     handles: Map<any, number>;
   };
+  runs: Map<number, RunIterator<any, any>>;
 }
 interface Context {
   instance: Lumiana;
@@ -72,6 +85,115 @@ interface Context {
 }
 const singletonKey = Symbol.for('lumiana.context');
 const global = globalThis as any;
+
+class RunIterator<Yield, Return> implements RemoteRunIterator<Yield, Return> {
+  private queue: Array<
+    { result: IteratorResult<Yield, Return>; error?: never } | { result?: never; error: unknown }
+  > = [];
+  private waiting: Array<{
+    resolve: (result: IteratorResult<Yield, Return>) => void;
+    reject: (error: unknown) => void;
+  }> = [];
+  private outstanding = 0;
+  private ended = false;
+
+  constructor(
+    private owner: Connection,
+    private handle: number,
+  ) {
+    this.credit(16);
+  }
+
+  [Symbol.asyncIterator](): AsyncIterableIterator<Yield> {
+    return this as AsyncIterableIterator<Yield>;
+  }
+
+  next(value?: undefined): Promise<IteratorResult<Yield, Return>> {
+    if (value !== undefined)
+      return Promise.reject(new TypeError('A Lumiana run stream does not accept iterator input'));
+    const queued = this.queue.shift();
+    if (queued) {
+      this.replenish();
+      return 'error' in queued ? Promise.reject(queued.error) : Promise.resolve(queued.result);
+    }
+    if (this.ended) return Promise.resolve({ done: true, value: undefined as Return });
+    return new Promise((resolve, reject) => this.waiting.push({ resolve, reject }));
+  }
+
+  return(value?: Return): Promise<IteratorResult<Yield, Return>> {
+    const active = this.owner.runs.has(this.handle);
+    this.ended = true;
+    if (active) {
+      this.owner.runs.delete(this.handle);
+      if (this.owner.socket.readyState === 1)
+        send(this.owner, { type: 'run-cancel', handle: this.handle });
+    }
+    for (const waiter of this.waiting) waiter.resolve({ done: true, value: value as Return });
+    this.waiting.length = 0;
+    this.queue.length = 0;
+    return Promise.resolve({ done: true, value: value as Return });
+  }
+
+  throw(error?: unknown): Promise<IteratorResult<Yield, Return>> {
+    void this.return();
+    return Promise.reject(error);
+  }
+
+  receive(packet: any): void {
+    if (this.ended) return;
+    if (packet.event === 'error') {
+      this.ended = true;
+      this.owner.runs.delete(this.handle);
+      const error = decodeException(packet.error);
+      const waiter = this.waiting.shift();
+      if (waiter) waiter.reject(error);
+      else this.queue.push({ error });
+      for (const pending of this.waiting)
+        pending.resolve({ done: true, value: undefined as Return });
+      this.waiting.length = 0;
+      return;
+    }
+    this.outstanding = Math.max(0, this.outstanding - 1);
+    const result: IteratorResult<Yield, Return> =
+      packet.event === 'return'
+        ? { done: true, value: decodeValue(packet.value) }
+        : { done: false, value: decodeValue(packet.value) };
+    if (result.done) {
+      this.ended = true;
+      this.owner.runs.delete(this.handle);
+    }
+    const waiter = this.waiting.shift();
+    if (waiter) waiter.resolve(result);
+    else this.queue.push({ result });
+    if (result.done) {
+      for (const pending of this.waiting)
+        pending.resolve({ done: true, value: undefined as Return });
+      this.waiting.length = 0;
+    }
+    if (!result.done) this.replenish();
+  }
+
+  fail(error: unknown): void {
+    if (this.ended) return;
+    this.ended = true;
+    this.owner.runs.delete(this.handle);
+    for (const waiter of this.waiting) waiter.reject(error);
+    this.waiting.length = 0;
+    this.queue.length = 0;
+  }
+
+  private replenish(): void {
+    const available = this.outstanding + this.queue.length;
+    if (this.ended || available > 8 || this.owner.socket.readyState !== 1) return;
+    this.credit(16 - available);
+  }
+
+  private credit(count: number): void {
+    this.outstanding += count;
+    send(this.owner, { type: 'run-credit', handle: this.handle, count });
+  }
+}
+
 function connection(): Connection {
   const value = state.connection;
   if (!value || value.socket.readyState !== 1)
@@ -96,6 +218,26 @@ const state: Context = (global[singletonKey] ??= {
           send(c, { type: 'status', id });
         });
         return { ...result, latency: performance.now() - start };
+      },
+      async run(task: any, ...args: any[]): Promise<any> {
+        const c = connection();
+        let descriptor = task;
+        if (!descriptor?.__lumianaRun) {
+          if (typeof task !== 'function') throw new TypeError('lumiana.run() requires a function');
+          const source = Function.prototype.toString.call(task);
+          if (/\[native code\]/.test(source))
+            throw new TypeError('lumiana.run() cannot execute a native or bound function');
+          descriptor = {
+            __lumianaRun: true,
+            code: `module.exports = (${source});`,
+            filename: state.moduleRoot.replace(/\/$/, '') + '/lumiana.run.js',
+          };
+        }
+        const value = await invoke(c, 'run', descriptor, ...args);
+        if (!value?.__lumianaRunStream) return value;
+        const iterator = new RunIterator(c, value.__lumianaRunStream);
+        c.runs.set(value.__lumianaRunStream, iterator);
+        return iterator;
       },
       disconnect(): void {
         const c = connection();
@@ -166,6 +308,8 @@ function close(c: Connection, error = new Error('Lumiana is disconnected')): voi
   removeKernel(c);
   for (const promise of c.pending.values()) promise.reject(error);
   c.pending.clear();
+  for (const iterator of c.runs.values()) iterator.fail(error);
+  c.runs.clear();
   c.addons.values.clear();
   c.callbacks.clear();
 }
@@ -307,6 +451,7 @@ export const connect = {
           values: new Map(),
           handles: new Map(),
         },
+        runs: new Map(),
       };
       await new Promise<void>((resolve, reject) => {
         socket.onmessage = (event) => {
@@ -338,6 +483,10 @@ export const connect = {
             }
             if (packet.type === 'kernel-event') {
               dispatchKernel(packet.handle, packet.event, decodeValue(packet.value));
+              return;
+            }
+            if (packet.type === 'run-event') {
+              c.runs.get(packet.handle)?.receive(packet);
               return;
             }
             if (packet.type === 'callback') {

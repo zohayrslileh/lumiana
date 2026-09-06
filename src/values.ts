@@ -51,22 +51,28 @@ export function encodeValue(value: unknown): Graph {
         name: symbols.get(value) ?? Symbol.keyFor(value)!,
         global: !symbols.has(value),
       };
-    else if (value instanceof ArrayBuffer || ArrayBuffer.isView(value)) {
+    else if (
+      Object.prototype.toString.call(value) === '[object ArrayBuffer]' ||
+      ArrayBuffer.isView(value)
+    ) {
       const bytes =
-        value instanceof ArrayBuffer
+        Object.prototype.toString.call(value) === '[object ArrayBuffer]'
           ? new Uint8Array(value)
           : new Uint8Array(value.buffer, value.byteOffset, value.byteLength);
       const name = Buffer.isBuffer(value) ? 'Buffer' : value.constructor.name;
       if (!Object.hasOwn(binary, name)) throw new TypeError(`Unsupported binary type ${name}`);
       node = { kind: 'binary', name, bytes };
     } else if (Array.isArray(value)) node = { kind: 'array', items: value.map(visit) };
-    else if (value instanceof Date) node = { kind: 'date', value: value.getTime() };
-    else if (value instanceof RegExp)
+    else if (Object.prototype.toString.call(value) === '[object Date]')
+      node = { kind: 'date', value: value.getTime() };
+    else if (Object.prototype.toString.call(value) === '[object RegExp]')
       node = { kind: 'regexp', source: value.source, flags: value.flags };
     else if (
       typeof value === 'object' &&
-      (Object.getPrototypeOf(value) === Object.prototype ||
-        Object.getPrototypeOf(value) === null) &&
+      (Object.getPrototypeOf(value) === null ||
+        Object.getPrototypeOf(value) === Object.prototype ||
+        (Object.getPrototypeOf(Object.getPrototypeOf(value)) === null &&
+          Object.getPrototypeOf(value).constructor?.name === 'Object')) &&
       Object.prototype.toString.call(value) === '[object Object]' &&
       Reflect.ownKeys(value).every((key) => {
         const descriptor = Object.getOwnPropertyDescriptor(value, key)!;
@@ -129,7 +135,13 @@ export function decodeValue(graph: Graph): any {
 }
 
 export function encodeException(error: unknown): Failure {
-  if (error instanceof Error) return failure(error);
+  if (
+    error instanceof Error ||
+    (typeof error === 'object' &&
+      error !== null &&
+      Object.prototype.toString.call(error) === '[object Error]')
+  )
+    return failure(error);
   try {
     return { ...failure(error), thrown: encodeValue(error) };
   } catch {

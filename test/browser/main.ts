@@ -40,6 +40,38 @@ try {
     'repeated credentials return the singleton',
     (await connect.credentials({ username: 'lumiana', password: 'lumiana' })) === lumiana,
   );
+  const task = await lumiana.run(async (value: number) => {
+    const { threadId } = await import('node:worker_threads');
+    return {
+      value: value * 2,
+      threadId,
+      browserAPIs: [typeof window, typeof document, typeof fetch, typeof WebSocket],
+      binary: Buffer.from([0, 128, 255]),
+    };
+  }, 21);
+  check(
+    'run executes a copied task in an isolated worker',
+    task.value === 42 &&
+      task.threadId > 0 &&
+      task.browserAPIs.every((value: string) => value === 'undefined') &&
+      task.binary instanceof Uint8Array &&
+      task.binary.join(',') === '0,128,255',
+  );
+  const taskStream = await lumiana.run(function* () {
+    yield new Uint8Array([1, 2]);
+    yield new Uint8Array([3, 4]);
+    return 5;
+  });
+  const streamed: number[] = [];
+  for (;;) {
+    const item = await taskStream.next();
+    if (item.done) {
+      streamed.push(item.value);
+      break;
+    }
+    streamed.push(...item.value);
+  }
+  check('run streams generator output in order', streamed.join(',') === '1,2,3,4,5');
   const binary = new Uint8Array(200_000).map((_, i) => i % 256);
   const os = await import('node:os'),
     path = await import('node:path');

@@ -3,12 +3,65 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import os from 'node:os';
+import { pathToFileURL } from 'node:url';
 import {
   NativeAddons,
   moduleExportNames,
   requiresNodeResolution,
   transformSource,
 } from '../src/build.js';
+
+test('run tasks are captured before browser transforms and reject lexical captures', async () => {
+  const dependencies: string[] = [];
+  const transformed = await transformSource(
+    `import { lumiana } from 'lumiana/client';
+     export const task = lumiana.run(async (filename: string) => {
+       const fs = await import('node:fs/promises');
+       const packageValue = await import('example-package');
+       return { data: await fs.readFile(filename), packageValue };
+     }, '/tmp/data.bin');`,
+    'src/task.ts',
+    {
+      origin: 'src/task.ts',
+      sourceURL: 'file:///project/src/task.ts',
+      place: async () => ({}),
+      retainDependency: (dependency) => dependencies.push(dependency),
+    },
+  );
+  assert.match(transformed!.code, /__lumianaRun/);
+  assert.match(transformed!.code, /node:fs\/promises/);
+  assert.deepEqual(dependencies, ['example-package']);
+
+  await assert.rejects(
+    transformSource(
+      `import { lumiana } from 'lumiana/client';
+       const prefix = '/tmp';
+       lumiana.run(() => prefix);`,
+      'src/task.ts',
+      { place: async () => ({}) },
+    ),
+    /cannot capture browser bindings: prefix/,
+  );
+
+  const directory = await fs.mkdtemp(path.join(os.tmpdir(), 'lumiana-run-build-'));
+  try {
+    await fs.writeFile(path.join(directory, 'helper.ts'), "export const value='relative-proof';");
+    const relative = await transformSource(
+      `import { lumiana } from 'lumiana/client';
+       lumiana.run(async () => (await import('./helper')).value);`,
+      path.join(directory, 'entry.ts'),
+      {
+        origin: 'src/entry.ts',
+        sourceURL: pathToFileURL(path.join(directory, 'entry.ts')).href,
+        place: async () => ({}),
+      },
+    );
+    assert.match(relative!.code, /relative-proof/);
+    assert.doesNotMatch(relative!.code, /import\(['"]\.\/helper['"]\)/);
+  } finally {
+    await fs.rm(directory, { recursive: true, force: true });
+  }
+});
 
 test('unavailable CommonJS dependencies fail at the require call so package fallbacks work', async () => {
   const source = `let result;try { require('optional-addon'); } catch (error) { result = error.code; } module.exports = result;`;

@@ -6,6 +6,7 @@ export default defineConfig({
     browser: 'src/browser.ts',
     host: 'src/host.ts',
     worker: 'src/worker.ts',
+    'run-worker': 'src/run-worker.ts',
     'runtime/assert-strict': 'src/runtime/assert-strict.ts',
     'runtime/async-hooks': 'src/runtime/async-hooks.ts',
     'runtime/child-process': 'src/runtime/child-process.ts',

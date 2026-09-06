@@ -9,6 +9,7 @@ import { ChildProcessKernel } from './kernel/child-process.js';
 import { AddonKernel } from './kernel/addons.js';
 import { ModuleKernel } from './kernel/modules.js';
 import { SQLiteKernel } from './kernel/sqlite.js';
+import { RunKernel } from './kernel/run.js';
 
 if (!parentPort) throw new Error('Lumiana requires a worker thread');
 const port = parentPort;
@@ -81,6 +82,7 @@ const sqlite = new SQLiteKernel(allocateHandle, {
   sync: (id, args) => invokeCallback(id, undefined, args, true),
   async: invokeCallbackAsync,
 });
+const runs = new RunKernel(workerData.root, allocateHandle, send, send);
 
 const decodeArguments = (values: any[]) => values.map((value) => decodeValue(value));
 const result = (id: number, value: any) =>
@@ -90,6 +92,7 @@ const reject = (id: number, error: unknown) =>
 
 async function close(): Promise<void> {
   await Promise.all([files.close(), network.close(), children.close()]);
+  runs.close();
   dns.close();
   addons.close();
   sqlite.close();
@@ -110,10 +113,25 @@ function handle(message: any): void {
     } else replies.set(message.id, message);
     return;
   }
+  if (message.type === 'run-credit') {
+    runs.credit(message.handle, message.count);
+    return;
+  }
+  if (message.type === 'run-cancel') {
+    runs.cancel(message.handle);
+    return;
+  }
   if (message.type !== 'invoke') return;
   const invocation = message.invocation;
   try {
     const [operation, ...args] = decodeArguments(invocation.args);
+    if (invocation.operation === 'run') {
+      void runs.execute(operation, args).then(
+        (value) => result(message.id, value),
+        (error) => reject(message.id, error),
+      );
+      return;
+    }
     if (invocation.operation === 'kernel') {
       const kernel = operation.startsWith('fs.')
         ? files

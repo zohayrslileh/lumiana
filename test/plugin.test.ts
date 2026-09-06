@@ -195,13 +195,18 @@ test('Vite keeps package JavaScript local and deploys only detected native addon
       'index.js': "module.exports=require('@native/platform/binding.node');",
     });
     await pkg('explicit', { 'index.js': "export default 'explicit-proof';" }, { type: 'module' });
+    await pkg(
+      'task-package',
+      { 'index.js': "export default 'task-package-proof';" },
+      { type: 'module' },
+    );
     await fs.writeFile(
       path.join(root, 'index.html'),
       '<script type="module" src="/main.js"></script>',
     );
     await fs.writeFile(
       path.join(root, 'main.js'),
-      "import {connect} from 'lumiana/client';await connect.credentials({username:'build-user',password:'build-password'});await import('./entry.js');",
+      "import {connect,lumiana} from 'lumiana/client';await connect.credentials({username:'build-user',password:'build-password'});await lumiana.run(async()=>await import('task-package'));await import('./entry.js');",
     );
     await fs.writeFile(
       path.join(root, 'entry.js'),
@@ -260,7 +265,9 @@ test('Vite keeps package JavaScript local and deploys only detected native addon
     assert.equal(manifest.dependencies['filesystem-library'], undefined);
     assert.equal(manifest.dependencies['socket-library'], undefined);
     assert.equal(manifest.dependencies.conditional, undefined);
+    assert.equal(manifest.dependencies['task-package'], '1.0.0');
     assert.ok((await fs.stat(path.join(root, 'dist/server/worker.js'))).size > 0);
+    assert.ok((await fs.stat(path.join(root, 'dist/server/run-worker.js'))).size > 0);
     const main = await fs.readFile(path.join(root, 'dist/main.mjs'), 'utf8');
     assert.ok(main.includes('username: process.env.LUMIANA_USERNAME ?? "build-user"'));
     assert.ok(main.includes('password: process.env.LUMIANA_PASSWORD ?? "build-password"'));

@@ -433,6 +433,73 @@ test('client contract through real HTTP, binary WebSocket and an isolated native
     assert.equal((await compile('export const value = process.env.HOME;')).value, process.env.HOME);
     assert.equal(XMLHttpRequest.requests - beforeHome, 0, 'local process reads need no XHR');
     assert.equal(await (await hybridFetch(url + '/same')).text(), 'browser');
+    const taskResult = await lumiana.run(async (value: number) => {
+      const { threadId } = await import('node:worker_threads');
+      return {
+        value: value * 2,
+        threadId,
+        browser: {
+          window: typeof window,
+          document: typeof document,
+          fetch: typeof fetch,
+          WebSocket: typeof WebSocket,
+        },
+        binary: Buffer.from([0, 128, 255]),
+      };
+    }, 21);
+    assert.equal(taskResult.value, 42);
+    assert.deepEqual(taskResult.browser, {
+      window: 'undefined',
+      document: 'undefined',
+      fetch: 'undefined',
+      WebSocket: 'undefined',
+    });
+    assert.deepEqual([...taskResult.binary], [0, 128, 255]);
+    assert.deepEqual(
+      await lumiana.run(() => Buffer.from([1, 2, 3])),
+      Buffer.from([1, 2, 3]),
+      'an iterable copied value is not mistaken for a generator',
+    );
+    const taskThreadIds = await Promise.all([
+      lumiana.run(async () => (await import('node:worker_threads')).threadId),
+      lumiana.run(async () => (await import('node:worker_threads')).threadId),
+    ]);
+    assert.notEqual(taskThreadIds[0], taskThreadIds[1], 'each run owns a fresh worker');
+    const stream = await lumiana.run(async function* (count: number) {
+      const { setTimeout } = await import('node:timers/promises');
+      for (let index = 0; index < count; index++) {
+        await setTimeout(2);
+        yield Buffer.from([index, 255 - index]);
+      }
+      return 'complete';
+    }, 3);
+    assert.deepEqual(await stream.next(), { done: false, value: Buffer.from([0, 255]) });
+    assert.deepEqual(await stream.next(), { done: false, value: Buffer.from([1, 254]) });
+    assert.deepEqual(await stream.next(), { done: false, value: Buffer.from([2, 253]) });
+    assert.deepEqual(await stream.next(), { done: true, value: 'complete' });
+    const promisedStream = await lumiana.run(function* () {
+      yield Promise.resolve(7);
+      return Promise.resolve(8);
+    });
+    assert.deepEqual(await promisedStream.next(), { done: false, value: 7 });
+    assert.deepEqual(await promisedStream.next(), { done: true, value: 8 });
+    const failingStream = await lumiana.run(function* () {
+      yield 'before-error';
+      throw new TypeError('stream failure');
+    });
+    assert.deepEqual(await failingStream.next(), { done: false, value: 'before-error' });
+    await assert.rejects(failingStream.next(), { name: 'TypeError', message: 'stream failure' });
+    await assert.rejects(
+      lumiana.run(() => {
+        throw new RangeError('task failure');
+      }),
+      { name: 'RangeError', message: 'task failure' },
+    );
+    const cancelled = await lumiana.run(function* () {
+      for (let index = 0; ; index++) yield index;
+    });
+    assert.deepEqual(await cancelled.next(), { done: false, value: 0 });
+    assert.deepEqual(await cancelled.return(), { done: true, value: undefined });
     const before = browserRequests;
     const other = `http://127.0.0.1:${otherPort}`;
     assert.equal(await (await hybridFetch(other + '/cross')).text(), 'remote');

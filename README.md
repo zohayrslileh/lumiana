@@ -128,6 +128,51 @@ console.log(status.latency);
 The result contains the server PID, uptime, mode, Node version, platform, memory usage, active
 connection count, server time, and latency.
 
+### `await lumiana.run(task, ...args)`
+
+Executes the complete function in a fresh isolated Node Worker. The task has `process`, `Buffer`,
+CommonJS `require`, and dynamic module loading, but no browser globals such as `window`, `document`,
+`fetch`, or `WebSocket`.
+
+```ts
+const data = await lumiana.run(async () => {
+  const fs = await import('node:fs/promises');
+  return fs.readFile('./data.bin');
+});
+```
+
+Inline TypeScript and JavaScript tasks are captured before Vite transforms browser code. A task
+cannot capture variables from the browser's lexical scope because that scope does not exist in its
+Worker. Pass runtime values as arguments when the task needs them:
+
+```ts
+const data = await lumiana.run(async (filename) => {
+  const fs = await import('node:fs/promises');
+  return fs.readFile(filename);
+}, selectedFilename);
+```
+
+Arguments and ordinary results use the normal copied-value boundary: primitives, plain data
+objects, arrays, dates, regular expressions, and binary views. Binary data remains binary. A
+function that returns a synchronous or asynchronous generator resolves to an async iterator whose
+values arrive as they are produced:
+
+```ts
+const chunks = await lumiana.run(async function* () {
+  const fs = await import('node:fs');
+  for await (const chunk of fs.createReadStream('./large.bin')) yield chunk;
+});
+
+for await (const chunk of chunks) {
+  // chunk arrives without waiting for the whole file
+}
+```
+
+The iterator uses bounded credits, so a fast producer cannot buffer without limit. Calling
+`return()`, including the implicit call made by breaking from `for await`, cancels its Worker.
+External packages imported by a task are recorded in the production manifest automatically. Local
+relative imports used by the task are bundled into the task itself.
+
 ### `lumiana.disconnect()`
 
 Closes the connection, stops its dedicated Worker, rejects pending operations, and invalidates

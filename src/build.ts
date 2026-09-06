@@ -8,6 +8,7 @@ import { init as initESM, parse as parseESM } from 'es-module-lexer';
 import { resolve as resolveImport } from 'import-meta-resolve';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import MagicString from 'magic-string';
+import { build as compileTask } from 'esbuild';
 export interface Placement {
   available?: boolean;
   replacement?: string;
@@ -177,6 +178,23 @@ export class NativeAddons {
       this.addons.set(owner.name, path.join(owner.root, 'package.json'));
     } catch {}
   }
+  /** Retain a package whose code is intentionally loaded by the engine at runtime. */
+  async retainRequest(request: string, importer: string): Promise<void> {
+    if (!bare(request) || isBuiltin(request)) return;
+    let resolved: string | undefined;
+    try {
+      resolved = fileURLToPath(await resolveImport(request, pathToFileURL(importer).href));
+    } catch {
+      try {
+        resolved = createRequire(importer).resolve(request);
+      } catch {}
+    }
+    if (!resolved) return;
+    try {
+      const owner = this.owner(resolved);
+      this.addons.set(owner.name, path.join(owner.root, 'package.json'));
+    } catch {}
+  }
   async locate(request: string, importer: string, computed = false): Promise<string | undefined> {
     if (!computed) {
       try {
@@ -240,6 +258,8 @@ export interface TransformOptions {
   locateAddon?(request: string, computed?: boolean): Promise<string | undefined>;
   /** Retain the package whose files are addressed by runtime module resolution. */
   retainPackage?(): void;
+  /** Retain a package explicitly imported by an isolated run task. */
+  retainDependency?(request: string): void | Promise<void>;
   origin?: string;
   /** Native file URL for the source module represented by this transform. */
   sourceURL?: string;
@@ -318,6 +338,7 @@ export async function transformSource(source: string, id: string, options: Trans
     addonCalls: any[] = [],
     dynamicRequires: any[] = [];
   const contextualRequire = new Set<any>();
+  const lumianaBindings = new Set<any>();
   const fileURLToPathBindings = new Set<any>();
   const urlModuleBindings = new Set<any>();
   const contextualCalls: any[] = [];
@@ -329,6 +350,14 @@ export async function transformSource(source: string, id: string, options: Trans
     ImportDeclaration(p: any) {
       const module = p.node.source.value.replace(/^node:/, '');
       for (const specifier of p.node.specifiers) {
+        if (
+          p.node.source.value === 'lumiana/client' &&
+          specifier.type === 'ImportSpecifier' &&
+          (specifier.imported.name ?? specifier.imported.value) === 'lumiana'
+        ) {
+          const binding = p.scope.getBinding(specifier.local.name);
+          if (binding) lumianaBindings.add(binding);
+        }
         if (
           module === 'module' &&
           specifier.type === 'ImportSpecifier' &&
@@ -482,6 +511,22 @@ export async function transformSource(source: string, id: string, options: Trans
   let commonjs = false,
     usesProcess = false,
     usesTimers = false;
+  const runTasks: any[] = [];
+  const runTask = (p: any) => {
+    const call = p.parentPath;
+    const callee = unwrapExpression(call?.node?.callee);
+    if (
+      !call?.isCallExpression() ||
+      call.node.arguments[0] !== p.node ||
+      callee?.type !== 'MemberExpression' ||
+      staticKey(callee) !== 'run' ||
+      callee.object.type !== 'Identifier' ||
+      !lumianaBindings.has(call.scope.getBinding(callee.object.name))
+    )
+      return;
+    runTasks.push(p);
+    p.skip();
+  };
   traverse(ast as any, {
     ImportDeclaration(p: any) {
       if (p.node.importKind !== 'type') moduleNodes.push(p);
@@ -531,6 +576,8 @@ export async function transformSource(source: string, id: string, options: Trans
     ImportExpression(p: any) {
       if (p.node.source.type === 'StringLiteral') moduleNodes.push(p);
     },
+    ArrowFunctionExpression: runTask,
+    FunctionExpression: runTask,
     ReferencedIdentifier(p: any) {
       if (
         !esm &&
@@ -551,6 +598,73 @@ export async function transformSource(source: string, id: string, options: Trans
         globals.push(p);
     },
   });
+  for (const task of runTasks) {
+    const external = new Set<string>();
+    task.traverse({
+      ReferencedIdentifier(p: any) {
+        const binding = p.scope.getBinding(p.node.name);
+        if (!binding) return;
+        const owner = binding.scope.path;
+        if (owner === task || owner.findParent((parent: any) => parent === task)) return;
+        external.add(p.node.name);
+      },
+    });
+    const captures = [...external];
+    if (captures.length)
+      throw new Error(
+        `lumiana.run() tasks cannot capture browser bindings: ${captures.sort().join(', ')}. Pass them as arguments instead.`,
+      );
+    const raw = source.slice(task.node.start, task.node.end);
+    const physical = id.split('?')[0]!;
+    const resolveDir = path.isAbsolute(physical)
+      ? path.dirname(physical)
+      : options.sourceURL?.startsWith('file:')
+        ? path.dirname(fileURLToPath(options.sourceURL))
+        : process.cwd();
+    const compiled = await compileTask({
+      stdin: {
+        contents: `module.exports = (${raw});`,
+        loader: /tsx?(?:\?|$)/.test(id) ? 'tsx' : 'jsx',
+        resolveDir,
+        sourcefile: path.basename(physical),
+      },
+      bundle: true,
+      format: 'cjs',
+      platform: 'node',
+      target: 'node22',
+      sourcemap: false,
+      legalComments: 'none',
+      plugins: [
+        {
+          name: 'lumiana-run-packages',
+          setup(build) {
+            build.onResolve({ filter: /.*/ }, (args) =>
+              bare(args.path) || isBuiltin(args.path)
+                ? { path: args.path, external: true }
+                : undefined,
+            );
+          },
+        },
+      ],
+      metafile: true,
+      write: false,
+      logLevel: 'silent',
+    });
+    for (const output of Object.values(compiled.metafile!.outputs))
+      for (const dependency of output.imports)
+        if (bare(dependency.path) && !isBuiltin(dependency.path))
+          await options.retainDependency?.(dependency.path);
+    edits.overwrite(
+      task.node.start,
+      task.node.end,
+      JSON.stringify({
+        __lumianaRun: true,
+        code: compiled.outputFiles![0]!.text,
+        filename: options.origin ?? id,
+      }),
+    );
+    moduleSourceChanged = true;
+  }
   for (const p of moduleNodes) {
     const n = p.node;
     const sourceNode = n.source ?? n.arguments?.[0];
