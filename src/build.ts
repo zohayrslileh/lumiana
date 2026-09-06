@@ -238,7 +238,7 @@ export interface TransformOptions {
   process?: string;
   timers?: string;
   locateAddon?(request: string, computed?: boolean): Promise<string | undefined>;
-  /** Retain the package whose runtime resources are addressed through require.resolve(). */
+  /** Retain the package whose files are addressed by runtime module resolution. */
   retainPackage?(): void;
   origin?: string;
   /** Native file URL for the source module represented by this transform. */
@@ -645,6 +645,10 @@ export async function transformSource(source: string, id: string, options: Trans
     return;
   };
   for (const p of dynamicRequires) {
+    // The package's JavaScript remains bundled, but the runtime-selected target
+    // cannot be materialized by the browser build. Retain the owning package so
+    // production installation supplies its native binaries and related files.
+    options.retainPackage?.();
     const hint = addonHint(p.node.arguments[0], p.scope);
     // Static JavaScript dependencies remain in the bundle. A runtime-selected
     // module has no build-time identity, so its value belongs to the native

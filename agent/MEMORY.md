@@ -48,6 +48,9 @@ resuming work. Verify details against source and never store credentials or secr
   in the browser bundle. The engine performs only the filesystem/module-resolution decision and
   returns the resolved path. Packages that address runtime resources this way are retained in the
   production manifest automatically while their JavaScript stays bundled.
+- A package that performs a runtime-computed `require()` is also retained in the production
+  manifest. Its JavaScript remains in the browser bundle; the dependency entry exists so the
+  production package installation provides native binaries and other runtime-addressed files.
 - Async commands and events use the established binary WebSocket. Inherently synchronous Node
   operations use one synchronous HTTP call. Large synchronous replies are gzip compressed.
 - Native `.node` imports are detected automatically. Package JavaScript stays bundled; only the
@@ -160,12 +163,13 @@ resuming work. Verify details against source and never store credentials or secr
   example launches Chromium, reads a page, and closes cleanly in Vite development and production
   preview. The esbuild example compiles TypeScript in the browser in development and standalone
   production; its executable package is inferred from `require.resolve()` and retained in the
-  deployment manifest. The React example runs an in-browser `@grpc/grpc-js` server and client in
-  development and production preview. Per-instance callback and Promise DNS resolvers retain their
-  native resolver state in the engine, while the resolver API stays local. The root suite passed 83
-  tests; typecheck and both builds passed. Formatting passed after applying Prettier and should be
-  rechecked after subsequent edits. These counts describe the current uncommitted worktree and
-  must be updated when the suite changes.
+  deployment manifest. The React example runs `better-sqlite3` JavaScript in the browser and loads
+  its native binary through the engine; the generated production manifest retains the package for
+  installation. Per-instance callback and Promise DNS resolvers retain their native resolver state
+  in the engine, while the resolver API stays local. The root suite passed 83 tests; typecheck and
+  both builds passed. Formatting passed after applying Prettier and should be rechecked after
+  subsequent edits. These counts describe the current uncommitted worktree and must be updated when
+  the suite changes.
 - The published browser client has no raw `node:buffer` dependency, so importing it cannot produce
   Vite's browser-external stub even before the Lumiana plugin participates in resolution.
 - Optimized dependency output is keyed by a content fingerprint of Lumiana's installed Vite
