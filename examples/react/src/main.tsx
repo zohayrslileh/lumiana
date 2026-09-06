@@ -1,10 +1,18 @@
 import { StrictMode } from 'react';
 import { createRoot } from 'react-dom/client';
 import './index.css';
-import App from './App.tsx';
+import { connect } from 'lumiana/client';
 
-createRoot(document.getElementById('root')!).render(
-  <StrictMode>
-    <App />
-  </StrictMode>,
-);
+try {
+  await connect.credentials({ username: 'lumiana', password: 'lumiana' });
+  const { App } = await import('./App.tsx');
+
+  createRoot(document.getElementById('root')!).render(
+    <StrictMode>
+      <App />
+    </StrictMode>,
+  );
+} catch (error) {
+  document.body.textContent =
+    error instanceof Error ? (error.stack ?? error.message) : String(error);
+}

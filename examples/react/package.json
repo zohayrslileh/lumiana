@@ -10,9 +10,11 @@
     "preview": "vite preview"
   },
   "dependencies": {
+    "@hono/node-server": "^2.1.1",
+    "hono": "^4.13.7",
+    "lumiana": "link:lumiana",
     "react": "^19.2.8",
-    "react-dom": "^19.2.8",
-    "lumiana": "link:lumiana"
+    "react-dom": "^19.2.8"
   },
   "devDependencies": {
     "@babel/core": "^7.29.7",
