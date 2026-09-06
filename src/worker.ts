@@ -85,6 +85,7 @@ function handle(message: any): void {
         : operation.startsWith('addon.')
           ? addons
           : operation.startsWith('net.') ||
+              operation.startsWith('tls.') ||
               operation.startsWith('fetch.') ||
               operation.startsWith('websocket.')
             ? network
@@ -106,13 +107,15 @@ function handle(message: any): void {
           ? files.executeSync(operation, args)
           : operation.startsWith('addon.')
             ? addons.executeSync(operation, args)
-            : operation.startsWith('os.') ||
-                operation.startsWith('child.') ||
-                operation.startsWith('system.')
-              ? system.executeSync(operation, args)
-              : (() => {
-                  throw new TypeError(`Unknown synchronous operation ${operation}`);
-                })();
+            : operation.startsWith('tls.')
+              ? network.executeSync(operation, args)
+              : operation.startsWith('os.') ||
+                  operation.startsWith('child.') ||
+                  operation.startsWith('system.')
+                ? system.executeSync(operation, args)
+                : (() => {
+                    throw new TypeError(`Unknown synchronous operation ${operation}`);
+                  })();
       } finally {
         context = previous;
       }

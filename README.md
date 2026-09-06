@@ -203,7 +203,8 @@ Lumiana currently provides browser-owned contracts for:
 
 - `node:fs`, including callback, Promise, synchronous, stream, and watcher forms
 - `node:net`, including TCP and Unix sockets
-- `node:http` servers, streaming clients, and connection upgrades
+- `node:http` and `node:https` servers, streaming clients, and connection upgrades
+- `node:tls` connections and servers, including upgrades of existing TCP sockets
 - `node:child_process`, including local streams and lifecycle events
 - `node:os` and local stable system information
 - `node:crypto` and `node:zlib`
@@ -219,8 +220,17 @@ Worker keeps their operating-system handles. `process.env`, `homedir()`, and `pl
 connection snapshots and make no request when read or serialized.
 
 `node:tty`, `node:perf_hooks`, `node:v8`, and `node:vm` provide their currently supported local
-behavior. `node:https`, `node:http2`, and `node:tls` currently report a clear unsupported runtime
-contract when an operational method is called.
+behavior. `node:http2` currently reports a clear unsupported runtime contract when an
+operational method is called.
+
+TLS uses the connected Worker's native implementation for encryption and certificate validation.
+The browser owns the `TLSSocket`, its streams, and any custom `checkServerIdentity` callback.
+Handshake metadata travels with the connection event, so certificate, cipher, protocol, and
+session getters do not make extra requests. HTTPS uses the same local HTTP parser over TLS.
+
+TLS support is not yet the complete Node API: callback-based SNI/ALPN selection, PSK callbacks,
+renegotiation, and runtime server context changes remain unimplemented. HTTP Agent pooling and
+custom Agent behavior also remain unimplemented.
 
 Static missing optional dependencies are recorded during the build. A local `createRequire()` then
 throws `MODULE_NOT_FOUND` without contacting the server, allowing the package's own fallback logic

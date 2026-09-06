@@ -2,9 +2,20 @@ import { EventEmitter } from 'events';
 import { kernelCall, kernelSubscribe } from './bridge.js';
 import { createHttp } from './http-core.js';
 import { createHttpClient } from './http-client.js';
+import { network } from './socket-runtime.js';
 
-const runtime = createHttp(kernelCall, kernelSubscribe);
-export const { ClientRequest, request, get } = createHttpClient(kernelCall, kernelSubscribe);
+const runtime = createHttp(kernelCall, kernelSubscribe, {
+  operation: 'http.server',
+  Socket: network.Socket,
+  options: (options: any) => options,
+});
+export const httpClient = createHttpClient(kernelCall, kernelSubscribe, {
+  protocol: 'http:',
+  defaultPort: 80,
+  createConnection: network.createConnection,
+});
+
+export const { ClientRequest, request, get } = httpClient;
 
 export const { Server, IncomingMessage, ServerResponse, createServer } = runtime;
 

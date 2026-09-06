@@ -5,15 +5,22 @@ import { createNetwork, type KernelSubscribe } from './network.js';
 import type { KernelCall } from './filesystem.js';
 
 /** HTTP framing stays local; the transport owns only the underlying byte stream. */
-export function createHttpClient(call: KernelCall, subscribe: KernelSubscribe): any {
-  const { createConnection } = createNetwork(call, subscribe);
+export function createHttpClient(
+  call: KernelCall,
+  subscribe: KernelSubscribe,
+  transport = {
+    protocol: 'http:',
+    defaultPort: 80,
+    createConnection: createNetwork(call, subscribe).createConnection,
+  },
+): any {
   class ClientRequest extends stream.Writable {
     socket: any;
     connection: any;
     method: string;
     path: string;
     host: string;
-    protocol = 'http:';
+    protocol: string;
     aborted = false;
     headersSent = false;
     private headers = new Map<string, { name: string; value: any }>();
@@ -21,11 +28,13 @@ export function createHttpClient(call: KernelCall, subscribe: KernelSubscribe): 
     private upgraded = false;
     private response: any;
     private parser = new HTTPParser(HTTPParser.RESPONSE);
-    constructor(options: any, callback?: Function) {
+    constructor(options: any, callback?: Function, connectionTransport = transport) {
       super({ autoDestroy: false });
-      if (options.protocol && options.protocol !== 'http:')
+      const { createConnection, protocol, defaultPort } = connectionTransport;
+      this.protocol = protocol;
+      if (options.protocol && options.protocol !== protocol)
         throw Object.assign(
-          new TypeError(`Protocol ${options.protocol} is not supported by http`),
+          new TypeError(`Protocol ${options.protocol} is not supported by ${protocol}`),
           { code: 'ERR_INVALID_PROTOCOL' },
         );
       this.method = String(options.method ?? 'GET').toUpperCase();
@@ -38,7 +47,8 @@ export function createHttpClient(call: KernelCall, subscribe: KernelSubscribe): 
       if (!this.hasHeader('host'))
         this.setHeader(
           'Host',
-          this.host + (options.port && Number(options.port) !== 80 ? `:${options.port}` : ''),
+          this.host +
+            (options.port && Number(options.port) !== defaultPort ? `:${options.port}` : ''),
         );
       if (options.auth && !this.hasHeader('authorization'))
         this.setHeader('Authorization', `Basic ${Buffer.from(options.auth).toString('base64')}`);
@@ -106,8 +116,16 @@ export function createHttpClient(call: KernelCall, subscribe: KernelSubscribe): 
           this.socket = this.connection = (options.createConnection ?? createConnection)({
             ...options,
             host: this.host,
-            port: options.port ?? 80,
+            port: options.port ?? defaultPort,
             path: options.socketPath,
+            ...(protocol === 'https:' && options.servername === undefined
+              ? {
+                  servername:
+                    this.host.includes(':') || /^\d+\.\d+\.\d+\.\d+$/.test(this.host)
+                      ? ''
+                      : this.host,
+                }
+              : {}),
           });
           this.socket.on('data', this.onData);
           this.socket.on('error', (error: Error) => this.destroy(error));
@@ -243,29 +261,32 @@ export function createHttpClient(call: KernelCall, subscribe: KernelSubscribe): 
       done(error);
     }
   }
-  function request(input: any, options?: any, callback?: any) {
-    if (typeof options === 'function') {
-      callback = options;
-      options = undefined;
+  function withTransport(connectionTransport: typeof transport) {
+    function request(input: any, options?: any, callback?: any) {
+      if (typeof options === 'function') {
+        callback = options;
+        options = undefined;
+      }
+      if (typeof input === 'string' || input instanceof URL) {
+        const url = new URL(input);
+        input = {
+          protocol: url.protocol,
+          hostname: url.hostname.replace(/^\[|\]$/g, ''),
+          port: url.port || undefined,
+          path: url.pathname + url.search,
+          ...(url.username
+            ? { auth: `${decodeURIComponent(url.username)}:${decodeURIComponent(url.password)}` }
+            : {}),
+        };
+      }
+      return new ClientRequest({ ...input, ...options }, callback, connectionTransport);
     }
-    if (typeof input === 'string' || input instanceof URL) {
-      const url = new URL(input);
-      input = {
-        protocol: url.protocol,
-        hostname: url.hostname.replace(/^\[|\]$/g, ''),
-        port: url.port || undefined,
-        path: url.pathname + url.search,
-        ...(url.username
-          ? { auth: `${decodeURIComponent(url.username)}:${decodeURIComponent(url.password)}` }
-          : {}),
-      };
-    }
-    return new ClientRequest({ ...input, ...options }, callback);
+    const get = (...args: any[]) => {
+      const result = request(args[0], args[1], args[2]);
+      result.end();
+      return result;
+    };
+    return { request, get };
   }
-  const get = (...args: any[]) => {
-    const result = request(args[0], args[1], args[2]);
-    result.end();
-    return result;
-  };
-  return { ClientRequest, request, get };
+  return { ClientRequest, ...withTransport(transport), withTransport };
 }

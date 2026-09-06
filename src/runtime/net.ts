@@ -1,7 +1,4 @@
-import { kernelCall, kernelSubscribe } from './bridge.js';
-import { createNetwork } from './network.js';
-
-const runtime = createNetwork(kernelCall, kernelSubscribe);
+import { network as runtime } from './socket-runtime.js';
 
 export const { Socket, Server, createServer, createConnection, connect } = runtime;
 
@@ -27,4 +24,4 @@ export function isIP(input: string): 0 | 4 | 6 {
   return isIPv4(input) ? 4 : isIPv6(input) ? 6 : 0;
 }
 
-export default { ...runtime, isIP, isIPv4, isIPv6 };
+export default { Socket, Server, createServer, createConnection, connect, isIP, isIPv4, isIPv6 };

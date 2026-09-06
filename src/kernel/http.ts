@@ -1,6 +1,7 @@
 import http, { type IncomingMessage, type Server, type ServerResponse } from 'node:http';
 import { NetworkKernel, type KernelEvent } from './network.js';
 import type { Socket } from 'node:net';
+import https from 'node:https';
 
 const errorRecord = (error: NodeJS.ErrnoException & { address?: string; port?: number }) => ({
   name: error.name,
@@ -111,12 +112,16 @@ export class HttpKernel {
 
   async execute(operation: string, args: any[]): Promise<any> {
     switch (operation) {
+      case 'https.server':
       case 'http.server': {
         const handle = this.allocate();
-        const server = http.createServer(args[0] ?? {}, (request, response) =>
-          this.attach(handle, request, response),
-        );
+        const secure = operation === 'https.server';
+        const server: Server = secure
+          ? https.createServer(this.network.tls.options(args[0]))
+          : http.createServer(args[0] ?? {});
+        server.on('request', (request, response) => this.attach(handle, request, response));
         this.servers.set(handle, server);
+        server.on('connection', (socket) => this.network.trackSocket(socket));
         for (const event of ['upgrade', 'connect'] as const)
           server.on(event, (request, socket, head) => {
             this.event(handle, event, {
@@ -129,6 +134,10 @@ export class HttpKernel {
               head: new Uint8Array(head),
             });
           });
+        if (secure)
+          server.on('tlsClientError', (error) =>
+            this.event(handle, 'tlsClientError', errorRecord(error)),
+          );
         server.on('listening', () => this.event(handle, 'listening', server.address()));
         server.on('close', () => {
           this.servers.delete(handle);

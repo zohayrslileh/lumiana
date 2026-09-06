@@ -56,11 +56,14 @@ platform.
 | `csv-parse`      | Real file stream with three-byte chunks, split Unicode and quoted newlines                                          |
 | `express`        | Routing, JSON middleware, actual HTTP POST, request/response event ordering                                         |
 | `fast-glob`      | Synchronous and asynchronous directory scans agree                                                                  |
+| `https`          | Verified HTTPS streaming, original ws over WSS, compression, binary data, socket constructor identity, clean close  |
+| `tls`            | Existing TCP socket upgrade, certificate and hostname verification, ALPN, binary echo, socket constructor identity  |
 | `semver`         | Pure local version selection and increment                                                                          |
 | `tar`            | File → gzip TAR → extracted exact content                                                                           |
 | `yaml`           | Pure local Unicode serialization and parsing                                                                        |
 
-The networking cases bind temporary loopback ports. These tests do not require an
+The networking cases bind temporary loopback ports. The TLS fixture contains public
+test credentials for localhost; it is not a deployment certificate. These tests do not require an
 external service or a database installation.
 
 ## Runtime findings
@@ -69,6 +72,9 @@ The examples exercise shared contracts, not adapters for these packages:
 
 - HTTP clients parse response framing locally over the byte-stream transport;
   HTTP upgrades hand the same socket and unconsumed bytes to the consumer.
+- TLS handshakes and encryption use native Node sockets. The browser retains stream
+  ownership and custom hostname callbacks; negotiated metadata is available locally.
+- HTTPS shares HTTP framing and lifecycle handling, including secure WebSocket upgrades.
 - Corked socket writes become one kernel write. Headers and the first request
   body chunk are sent together; empty writes make no request.
 - Local streams own `end` and `finish` ordering. A transport `close` cannot
@@ -91,8 +97,9 @@ not automatically by that command.
 ## Scope
 
 Passing these scenarios is evidence for the exercised behaviors, not a claim that
-every API of each package is supported. `node:https`, `node:tls`, and `node:http2`
-remain unsupported. The HTTP client currently opens a connection per request;
+every API of each package is supported. `node:http2` remains unsupported. TLS
+callback-based SNI/ALPN selection, PSK callbacks, renegotiation, and runtime server
+context changes are not implemented. The HTTP client currently opens a connection per request;
 Agent pooling and custom Agent behavior are not implemented. Tests use local
 loopback networking; deployment across machines, Windows filesystem operations,
 and sustained-load behavior still need separate validation.

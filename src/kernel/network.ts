@@ -1,14 +1,19 @@
 import net, { type Server, type Socket } from 'node:net';
 import WebSocket from 'ws';
+import tls from 'node:tls';
+import { TlsContexts, tlsInfo } from './tls-contexts.js';
 
 export type KernelEvent = (handle: number, event: string, ...args: any[]) => void;
 
 /** Per-connection socket table. Only opaque handles and byte records cross the boundary. */
 export class NetworkKernel {
   private sequence = 0;
+  private connections = new Set<Socket>();
   private sockets = new Map<number, Socket>();
+  private socketListeners = new Map<number, () => void>();
   private servers = new Map<number, Server>();
   private websockets = new Map<number, WebSocket>();
+  readonly tls = new TlsContexts(() => this.next());
   private requests = new Map<string, AbortController>();
 
   constructor(
@@ -38,7 +43,7 @@ export class NetworkKernel {
     return socket;
   }
 
-  private socketInfo(socket: Socket) {
+  socketInfo(socket: Socket) {
     return {
       localAddress: socket.localAddress,
       localPort: socket.localPort,
@@ -46,26 +51,45 @@ export class NetworkKernel {
       remoteAddress: socket.remoteAddress,
       remotePort: socket.remotePort,
       remoteFamily: socket.remoteFamily,
+      ...(socket instanceof tls.TLSSocket ? tlsInfo(socket) : {}),
     };
   }
 
   private attachSocket(socket: Socket, paused = false): number {
+    this.trackSocket(socket);
     const handle = this.next();
     this.sockets.set(handle, socket);
+    const listeners: [string, (...args: any[]) => void][] = [];
+    const on = (event: string, listener: (...args: any[]) => void) => {
+      listeners.push([event, listener]);
+      socket.on(event, listener);
+    };
+    this.socketListeners.set(handle, () => {
+      for (const [event, listener] of listeners) socket.off(event, listener);
+      this.socketListeners.delete(handle);
+    });
     if (paused) socket.pause();
-    socket.on('connect', () => this.event(handle, 'connect', this.socketInfo(socket)));
-    socket.on('ready', () => this.event(handle, 'ready'));
-    socket.on('data', (data) =>
+    on('connect', () => this.event(handle, 'connect', this.socketInfo(socket)));
+    on('ready', () => this.event(handle, 'ready'));
+    if (socket instanceof tls.TLSSocket) {
+      on('secureConnect', () => {
+        socket.pause();
+        this.event(handle, 'secureConnect', this.socketInfo(socket));
+      });
+      on('session', (session) => this.event(handle, 'session', new Uint8Array(session)));
+      on('OCSPResponse', (response) => this.event(handle, 'OCSPResponse', response));
+    }
+    on('data', (data) =>
       this.event(
         handle,
         'data',
         typeof data === 'string' ? new TextEncoder().encode(data) : new Uint8Array(data),
       ),
     );
-    socket.on('end', () => this.event(handle, 'end'));
-    socket.on('drain', () => this.event(handle, 'drain'));
-    socket.on('timeout', () => this.event(handle, 'timeout'));
-    socket.on('error', (error: NodeJS.ErrnoException & { address?: string; port?: number }) =>
+    on('end', () => this.event(handle, 'end'));
+    on('drain', () => this.event(handle, 'drain'));
+    on('timeout', () => this.event(handle, 'timeout'));
+    on('error', (error: NodeJS.ErrnoException & { address?: string; port?: number }) =>
       this.event(handle, 'error', {
         name: error.name,
         message: error.message,
@@ -77,11 +101,18 @@ export class NetworkKernel {
         port: error.port,
       }),
     );
-    socket.on('close', (hadError) => {
+    on('close', (hadError) => {
       this.sockets.delete(handle);
+      this.socketListeners.get(handle)?.();
       this.event(handle, 'close', hadError);
     });
     return handle;
+  }
+
+  trackSocket(socket: Socket): void {
+    if (this.connections.has(socket)) return;
+    this.connections.add(socket);
+    socket.once('close', () => this.connections.delete(socket));
   }
 
   adoptSocket(socket: Socket) {
@@ -91,7 +122,8 @@ export class NetworkKernel {
 
   async close(): Promise<void> {
     const servers = [...this.servers.values()];
-    const sockets = [...this.sockets.values()];
+    const sockets = [...this.connections];
+    this.connections.clear();
     const websockets = [...this.websockets.values()];
     this.servers.clear();
     this.sockets.clear();
@@ -100,6 +132,7 @@ export class NetworkKernel {
     for (const socket of websockets) socket.terminate();
     for (const request of this.requests.values()) request.abort();
     this.requests.clear();
+    this.tls.close();
     await Promise.allSettled(
       servers.map(
         (server) =>
@@ -108,6 +141,15 @@ export class NetworkKernel {
           }),
       ),
     );
+  }
+
+  executeSync(operation: string, args: any[]): any {
+    if (operation === 'tls.socket') {
+      const socket = this.socket(Number(args[0])) as tls.TLSSocket;
+      const method = args[1] as 'exportKeyingMaterial';
+      return Reflect.apply(socket[method], socket, args.slice(2));
+    }
+    return this.tls.executeSync(operation, args);
   }
 
   async execute(operation: string, args: any[]): Promise<any> {
@@ -167,20 +209,49 @@ export class NetworkKernel {
       case 'websocket.close':
         this.websockets.get(Number(args[0]))?.close(args[1], args[2]);
         return undefined;
+      case 'tls.connect': {
+        const { customIdentity, socket: socketHandle, ...options } = this.tls.options(args[0]);
+        if (socketHandle !== undefined) {
+          options.socket = this.socket(socketHandle);
+          this.socketListeners.get(socketHandle)?.();
+          this.sockets.delete(socketHandle);
+        }
+        // A custom hostname check runs in its owning browser realm. OpenSSL still
+        // validates the chain; application reads and writes wait for that check.
+        if (customIdentity) options.checkServerIdentity = () => undefined;
+        const socket = tls.connect(options);
+        return { handle: this.attachSocket(socket) };
+      }
       case 'net.connect': {
         const socket = new net.Socket();
         const handle = this.attachSocket(socket);
         socket.connect(args[0]);
         return { handle };
       }
+      case 'tls.server':
       case 'net.server': {
-        const server = net.createServer(args[0] ?? {});
+        const secure = operation === 'tls.server';
+        const server = secure
+          ? tls.createServer(this.tls.options(args[0]))
+          : net.createServer(args[0] ?? {});
         const handle = this.next();
         this.servers.set(handle, server);
-        server.on('connection', (socket) => {
+        server.on('connection', (socket: Socket) => this.trackSocket(socket));
+        server.on(secure ? 'secureConnection' : 'connection', (socket: Socket) => {
           const socketHandle = this.attachSocket(socket, true);
-          this.event(handle, 'connection', { handle: socketHandle, ...this.socketInfo(socket) });
+          this.event(handle, secure ? 'secureConnection' : 'connection', {
+            handle: socketHandle,
+            ...this.socketInfo(socket),
+          });
         });
+        if (secure)
+          server.on('tlsClientError', (error: NodeJS.ErrnoException) =>
+            this.event(handle, 'tlsClientError', {
+              name: error.name,
+              message: error.message,
+              code: error.code,
+            }),
+          );
         server.on('listening', () => this.event(handle, 'listening', server.address()));
         server.on('error', (error: NodeJS.ErrnoException & { address?: string; port?: number }) =>
           this.event(handle, 'error', {
@@ -220,7 +291,9 @@ export class NetworkKernel {
         );
         return undefined;
       case 'net.end':
-        this.socket(Number(args[0])).end(args[1]);
+        // Native end() without data remains a no-op after close. The peer can
+        // close while the browser's writable finalizer is crossing the boundary.
+        this.sockets.get(Number(args[0]))?.end(args[1]);
         return undefined;
       case 'net.destroy':
         this.sockets.get(Number(args[0]))?.destroy();

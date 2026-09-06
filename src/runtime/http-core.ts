@@ -20,8 +20,16 @@ const listenOptions = (args: any[]) => {
   };
 };
 
-export function createHttp(call: KernelCall, subscribe: KernelSubscribe): any {
-  const { Socket } = createNetwork(call, subscribe);
+export function createHttp(
+  call: KernelCall,
+  subscribe: KernelSubscribe,
+  transport = {
+    operation: 'http.server',
+    Socket: createNetwork(call, subscribe).Socket,
+    options: (options: any) => options,
+  },
+): any {
+  const { Socket } = transport;
   class Connection extends EventEmitter {
     destroyed = false;
     connecting = false;
@@ -242,7 +250,10 @@ export function createHttp(call: KernelCall, subscribe: KernelSubscribe): any {
       super();
       if (typeof options === 'function') listener = options;
       if (listener) this.on('request', listener);
-      void call('http.server', typeof options === 'object' ? options : undefined).then(
+      void call(
+        transport.operation,
+        transport.options(typeof options === 'object' ? options : undefined),
+      ).then(
         ({ handle }) => {
           this.handle = handle;
           this.release = subscribe(handle, (event, args) => this.incoming(event, args));
@@ -258,7 +269,8 @@ export function createHttp(call: KernelCall, subscribe: KernelSubscribe): any {
         const request = new Readable({ read() {} });
         Object.assign(request, info, { socket, connection: socket });
         if (!this.emit(event, request, socket, Buffer.from(info.head))) socket.destroy();
-      } else if (event === 'request') {
+      } else if (event === 'tlsClientError') this.emit(event, error(args[0]));
+      else if (event === 'request') {
         const info = args[0];
         const request = new IncomingMessage(info.request, info);
         const response = new ServerResponse(info.response, request);

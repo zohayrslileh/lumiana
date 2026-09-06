@@ -15,6 +15,7 @@ export default defineConfig({
     'runtime/http2': 'src/runtime/http2.ts',
     'runtime/https': 'src/runtime/https.ts',
     'runtime/module': 'src/runtime/module.ts',
+    'runtime/socket-runtime': 'src/runtime/socket-runtime.ts',
     'runtime/net': 'src/runtime/net.ts',
     'runtime/path': 'src/runtime/path.ts',
     'runtime/os': 'src/runtime/os.ts',
@@ -41,7 +42,16 @@ export default defineConfig({
   },
   removeNodeProtocol: false,
   target: 'node20',
-  // Filesystem entry points must share the constructors used to hydrate kernel results.
-  external: ['vite', 'esbuild', './browser.js', './filesystem.js'],
+  // Runtime entry points share constructors across built-in imports and createRequire().
+  external: [
+    'vite',
+    'esbuild',
+    './browser.js',
+    './filesystem.js',
+    './socket-runtime.js',
+    './tls.js',
+    './http.js',
+    './https.js',
+  ],
   noExternal: ['@msgpack/msgpack', 'import-meta-resolve', 'process', 'ws'],
 });

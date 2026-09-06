@@ -1,9 +1,25 @@
-import { unsupported } from './unsupported.js';
+import { kernelCall, kernelSubscribe, kernelCallSync } from './bridge.js';
+import { network } from './socket-runtime.js';
+import { createTls } from './tls-core.js';
 
-const call = (name: string, args: any[]) => {
-  return unsupported('node:tls', name);
+export const tlsRuntime = createTls(kernelCall, kernelSubscribe, kernelCallSync, network);
+export const {
+  TLSSocket,
+  Server,
+  connect,
+  createServer,
+  createSecureContext,
+  checkServerIdentity,
+  getCiphers,
+  getCACertificates,
+} = tlsRuntime;
+export default {
+  TLSSocket,
+  Server,
+  connect,
+  createServer,
+  createSecureContext,
+  checkServerIdentity,
+  getCiphers,
+  getCACertificates,
 };
-
-export const connect = (...args: any[]) => call('connect', args);
-export const createServer = (...args: any[]) => call('createServer', args);
-export default { connect, createServer };

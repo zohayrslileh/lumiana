@@ -10,7 +10,7 @@ export type KernelSubscribe = (
   listener: (event: string, args: any[]) => void,
 ) => () => void;
 
-const socketOptions = (args: any[]) => {
+export const socketOptions = (args: any[]) => {
   if (typeof args[0] === 'object')
     return Object.fromEntries(
       [
@@ -52,10 +52,17 @@ const callback = (args: any[]) =>
 const error = (value: any) => Object.assign(new Error(value.message), value);
 
 export function createNetwork(call: KernelCall, subscribe: KernelSubscribe): any {
+  const takeHandles = new WeakMap<object, () => Promise<number>>();
   class Socket extends Duplex {
-    private handle?: number;
-    private release?: () => void;
+    protected handle?: number;
+    protected release?: () => void;
+    private opening = false;
+    private nativeClosed = false;
+    private hadError = false;
+    private destroyDone?: (error?: Error | null) => void;
+    private destroyReason: Error | null = null;
     private settings = new Map<string, any[]>();
+    protected writableReady = false;
     connecting = false;
     pending = true;
     readyState: 'opening' | 'open' | 'readOnly' | 'writeOnly' | 'closed' = 'closed';
@@ -67,48 +74,86 @@ export function createNetwork(call: KernelCall, subscribe: KernelSubscribe): any
     remoteFamily?: string;
 
     constructor(options: any = {}) {
-      super({ ...options, emitClose: false });
+      super({ autoDestroy: true, ...options, emitClose: true });
+      takeHandles.set(this, async () => {
+        if (this.handle === undefined)
+          await new Promise<void>((resolve, reject) => {
+            const attached = () => {
+              this.off('error', failed);
+              resolve();
+            };
+            const failed = (error: Error) => {
+              this.off('_handle', attached);
+              reject(error);
+            };
+            this.once('_handle', attached);
+            this.once('error', failed);
+          });
+        const handle = this.handle!;
+        this.release?.();
+        this.handle = undefined;
+        this.writableReady = false;
+        return handle;
+      });
       if (options.handle !== undefined) this.attach(options.handle, options);
     }
 
-    private attach(handle: number, info: any = {}) {
+    protected attach(handle: number, info: any = {}) {
       this.handle = handle;
       Object.assign(this, info);
       this.pending = false;
       this.readyState = 'open';
+      this.writableReady = true;
       this.release = subscribe(handle, (event, args) => this.incoming(event, args));
       void call('net.resume', handle);
     }
 
-    private incoming(event: string, args: any[]) {
+    protected incoming(event: string, args: any[]) {
       if (event === 'connect') {
         this.connecting = false;
         this.pending = false;
         this.readyState = 'open';
         Object.assign(this, args[0]);
+        this.writableReady = true;
         this.emit('connect');
+        this.emit('_connected');
       } else if (event === 'ready') this.emit('ready');
       else if (event === 'data') {
         if (!this.push(Buffer.from(args[0]))) void call('net.pause', this.handle);
       } else if (event === 'end') {
         this.readyState = 'writeOnly';
         this.push(null);
-      } else if (event === 'error') this.emit('error', error(args[0]));
+      } else if (event === 'error') this.destroy(error(args[0]));
       else if (event === 'close') {
+        this.writableReady = false;
         this.readyState = 'closed';
+        this.nativeClosed = true;
+        this.hadError ||= Boolean(args[0]);
         this.release?.();
-        this.emit('close', args[0]);
+        if (this.destroyDone) {
+          const done = this.destroyDone;
+          this.destroyDone = undefined;
+          done(this.destroyReason);
+        } else this.destroy();
       } else this.emit(event, ...args);
     }
 
     connect(...args: any[]) {
       const done = callback(args);
       if (done) this.once('connect', done as any);
+      return this.open('net.connect', socketOptions(args));
+    }
+
+    protected open(operation: string, options: any) {
+      this.opening = true;
+      this.nativeClosed = false;
+      this.writableReady = false;
       this.connecting = true;
       this.pending = true;
       this.readyState = 'opening';
-      void call('net.connect', socketOptions(args)).then(
+      void call(operation, options).then(
         ({ handle }) => {
+          this.opening = false;
           this.handle = handle;
           this.release = subscribe(handle, (event, values) => this.incoming(event, values));
           if (this.destroyed) {
@@ -117,8 +162,16 @@ export function createNetwork(call: KernelCall, subscribe: KernelSubscribe): any
           }
           for (const [name, values] of this.settings) this.configure(name, ...values);
           this.settings.clear();
+          this.emit('_handle');
         },
-        (reason) => this.emit('error', reason),
+        (reason) => {
+          this.opening = false;
+          if (this.destroyDone) {
+            const done = this.destroyDone;
+            this.destroyDone = undefined;
+            done(this.destroyReason ?? reason);
+          } else this.destroy(reason);
+        },
       );
       return this;
     }
@@ -128,11 +181,36 @@ export function createNetwork(call: KernelCall, subscribe: KernelSubscribe): any
     }
 
     _write(chunk: any, encoding: BufferEncoding, done: (error?: Error | null) => void) {
-      if (this.handle === undefined) {
-        this.once('connect', () => this._write(chunk, encoding, done));
+      if (!this.writableReady) {
+        const ready = () => {
+          cleanup();
+          this._write(chunk, encoding, done);
+        };
+        const failed = (reason: Error) => {
+          cleanup();
+          done(reason);
+        };
+        const closed = () =>
+          failed(
+            Object.assign(new Error('Socket closed before connecting'), {
+              code: 'ERR_SOCKET_CLOSED',
+            }),
+          );
+        const cleanup = () => {
+          this.off('_connected', ready);
+          this.off('error', failed);
+          this.off('close', closed);
+        };
+        this.once('_connected', ready);
+        this.once('error', failed);
+        this.once('close', closed);
         return;
       }
       const bytes = typeof chunk === 'string' ? Buffer.from(chunk, encoding) : Buffer.from(chunk);
+      if (!bytes.length) {
+        done();
+        return;
+      }
       void call('net.write', this.handle, new Uint8Array(bytes)).then(() => done(), done);
     }
 
@@ -151,6 +229,12 @@ export function createNetwork(call: KernelCall, subscribe: KernelSubscribe): any
       );
     }
 
+    address() {
+      return this.localAddress
+        ? { address: this.localAddress, family: this.localFamily, port: this.localPort }
+        : {};
+    }
+
     ref() {
       if (this.handle !== undefined) void call('net.ref', this.handle);
       return this;
@@ -161,16 +245,29 @@ export function createNetwork(call: KernelCall, subscribe: KernelSubscribe): any
     }
 
     _final(done: (error?: Error | null) => void) {
-      if (this.handle === undefined) {
-        done();
+      if (!this.writableReady) {
+        this._write(Buffer.alloc(0), 'buffer' as BufferEncoding, (error) =>
+          error ? done(error) : this._final(done),
+        );
         return;
       }
       void call('net.end', this.handle).then(() => done(), done);
     }
 
-    override destroy(error?: Error) {
-      if (this.handle !== undefined) void call('net.destroy', this.handle);
-      return super.destroy(error);
+    _destroy(error: Error | null, done: (error?: Error | null) => void) {
+      this.hadError ||= Boolean(error);
+      this.destroyReason = error;
+      if (this.nativeClosed || (this.handle === undefined && !this.opening)) {
+        this.release?.();
+        done(error);
+      } else {
+        this.destroyDone = done;
+        if (this.handle !== undefined) void call('net.destroy', this.handle).catch(done);
+      }
+    }
+
+    override emit(event: string | symbol, ...args: any[]): boolean {
+      return super.emit(event, ...(event === 'close' ? [this.hadError] : args));
     }
 
     setNoDelay(enable = true) {
@@ -202,11 +299,15 @@ export function createNetwork(call: KernelCall, subscribe: KernelSubscribe): any
     private bound: any = null;
     listening = false;
 
-    constructor(options?: any, listener?: (socket: Socket) => void) {
+    constructor(
+      options?: any,
+      listener?: (socket: Socket) => void,
+      private transport = { operation: 'net.server', event: 'connection', Socket },
+    ) {
       super();
       if (typeof options === 'function') listener = options;
-      if (listener) this.on('connection', listener);
-      void call('net.server', typeof options === 'object' ? options : undefined).then(
+      if (listener) this.on(transport.event, listener);
+      void call(transport.operation, typeof options === 'object' ? options : undefined).then(
         ({ handle }) => {
           this.handle = handle;
           this.release = subscribe(handle, (event, args) => this.incoming(event, args));
@@ -217,7 +318,8 @@ export function createNetwork(call: KernelCall, subscribe: KernelSubscribe): any
     }
 
     private incoming(event: string, args: any[]) {
-      if (event === 'connection') this.emit('connection', new Socket(args[0]));
+      if (event === this.transport.event) this.emit(event, new this.transport.Socket(args[0]));
+      else if (event === 'tlsClientError') this.emit(event, error(args[0]));
       else if (event === 'listening') {
         this.bound = args[0];
         this.listening = true;
@@ -266,5 +368,10 @@ export function createNetwork(call: KernelCall, subscribe: KernelSubscribe): any
 
   const createServer = (options?: any, listener?: any) => new Server(options, listener);
   const createConnection = (...args: any[]) => new Socket().connect(...args);
-  return { Socket, Server, createServer, createConnection, connect: createConnection };
+  const takeSocket = (socket: object) => {
+    const take = takeHandles.get(socket);
+    if (!take) throw new TypeError('TLS requires a socket from the same Node runtime');
+    return take();
+  };
+  return { Socket, Server, createServer, createConnection, connect: createConnection, takeSocket };
 }
