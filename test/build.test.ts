@@ -43,6 +43,19 @@ test('both Node builtin specifier forms establish Node execution provenance', ()
     assert.equal(requiresNodeResolution(source), true, source);
   assert.equal(requiresNodeResolution('export const mode=process.env.NODE_ENV;'), false);
   assert.equal(requiresNodeResolution("export const present=typeof process!=='undefined';"), false);
+  for (const source of [
+    "typeof process==='object'&&typeof process.emit==='function'&&process.emit('event');",
+    "if(typeof process!=='undefined')process.emit('event');",
+    "const emit=typeof process!=='undefined'?process.emit:undefined;",
+    "typeof process==='undefined'||process.emit('event');",
+  ])
+    assert.equal(requiresNodeResolution(source), false, source);
+  for (const source of [
+    "typeof process.emit==='function';",
+    "typeof process==='undefined'&&process.emit('event');",
+    "typeof process!=='undefined'||process.emit('event');",
+  ])
+    assert.equal(requiresNodeResolution(source), true, source);
 });
 test('read-chain transforms preserve calls, writes, optional access and computed-key ordering', async () => {
   const source = `export default function () {

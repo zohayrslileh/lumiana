@@ -26,6 +26,7 @@ import tty from './tty.js';
 import v8 from './v8.js';
 import vm from './vm.js';
 import workerThreads from './worker-threads.js';
+import * as sqlite from './sqlite.js';
 
 const local: Record<string, any> = Object.assign(Object.create(null), {
   assert,
@@ -57,6 +58,7 @@ const local: Record<string, any> = Object.assign(Object.create(null), {
   v8,
   vm,
   worker_threads: workerThreads,
+  sqlite,
 });
 
 const names = new Set([
@@ -98,6 +100,7 @@ const names = new Set([
   'v8',
   'vm',
   'worker_threads',
+  'sqlite',
   'zlib',
 ]);
 

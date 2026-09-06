@@ -54,6 +54,7 @@ platform.
 | `tls-callbacks`  | Asynchronous SNI, synchronous ALPN and PSK, binary keys, accepting socket identity                                  |
 | `archiver`       | Real file → ZIP → independently inflated exact content                                                              |
 | `better-sqlite3` | Native addon, prepared statements, Unicode, binary BLOBs, commit and rollback                                       |
+| `node-sqlite`    | Built-in SQLite, browser callbacks and tag cache, prepared statements, binary BLOBs                                 |
 | `chokidar`       | Native filesystem add/change/unlink events, no events after closing                                                 |
 | `cross-spawn`    | Real Node child, exact stdout/stderr, exit code                                                                     |
 | `csv-parse`      | Real file stream with three-byte chunks, split Unicode and quoted newlines                                          |
@@ -90,6 +91,8 @@ The examples exercise shared contracts, not adapters for these packages:
   connected process's working directory.
 - Computed native addon filenames retain their runtime selection. JavaScript
   wrappers remain bundled; the addon owner is included in server dependencies.
+- Built-in SQLite keeps native database, statement, iterator, and session handles
+  in the engine. API objects, tagged-statement caching, and user callbacks remain in the browser.
 - Runtime implementation dependencies use browser export conditions. Node
   consumers retain Node resolution where their imports require it. Missing
   optional CommonJS dependencies throw at the original call so the package's own

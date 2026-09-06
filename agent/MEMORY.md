@@ -70,6 +70,9 @@ resuming work. Verify details against source and never store credentials or secr
   Vite owns `process.env.NODE_ENV`. Lumiana injects implicit Node globals into application modules
   and dependencies with explicit Node provenance; it never infers ownership from a package name or
   a guarded global access.
+- A guarded ambient fallback only avoids Node provenance when its control-flow condition proves the
+  ambient value exists on that branch. This covers React's guarded `process.emit` fallback without
+  misclassifying unsafe expressions such as `typeof process.emit`.
 - Node provenance propagates across every resolved dependency edge of a selected local Node
   contract, including relative files and helper packages. This keeps its complete implementation
   graph in one execution domain without affecting ordinary browser dependency graphs.
@@ -105,6 +108,8 @@ resuming work. Verify details against source and never store credentials or secr
   `perf_hooks`, `process`, `querystring`, `stream`, `stream/promises`, `string_decoder`, `timers`,
   `tty`, `url`, `util`, `v8` serialization, `vm` basics, and `zlib`.
 - Hybrid Fetch and WebSocket with binary transport and abort support.
+- `node:sqlite`: browser-owned API objects, iterators, tagged-statement caching, and callbacks;
+  engine-owned native database, statement, iterator, and session handles.
 
 ## Verified findings
 
@@ -136,11 +141,14 @@ resuming work. Verify details against source and never store credentials or secr
 - HTTP/2 interoperates in both directions with native Node peers. Its protocol machinery remains
   local, coalesces outgoing frames, rejects invalid settings, handles repeated identical ping
   payloads, and closes requests queued before connection without leaving them pending.
-- The compatibility suite now contains 16 browser examples. All 16 passed in Vite development,
-  Vite production preview, and standalone production launched from the repository root. The root
-  suite passed 72 tests; typecheck, formatting, root build, example build, and standalone native
+- The compatibility suite now contains 17 browser examples. All 17 passed in Vite production
+  preview, and the `node:sqlite` case also passed in Vite development and standalone production
+  launched from the repository root; the previous 16-case suite passed in both modes. The root suite
+  passed 77 tests; typecheck, formatting, root build, example build, and standalone native
   dependency installation passed. These counts describe the current uncommitted worktree and must
   be updated when the suite changes.
+- The published browser client has no raw `node:buffer` dependency, so importing it cannot produce
+  Vite's browser-external stub even before the Lumiana plugin participates in resolution.
 
 ## Remaining runtime domains
 

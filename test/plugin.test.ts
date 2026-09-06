@@ -4,6 +4,38 @@ import fs from 'node:fs/promises';
 import path from 'node:path';
 import { build } from 'vite';
 import { lumiana } from '../dist/vite.js';
+
+test('the published browser client has no raw Node builtin dependency', async () => {
+  const root = await fs.mkdtemp(path.join(process.cwd(), 'node_modules/.lumiana-client-build-'));
+  try {
+    const client = path.resolve('dist/client.js');
+    await fs.writeFile(
+      path.join(root, 'index.html'),
+      '<script type="module" src="/main.js"></script>',
+    );
+    await fs.writeFile(
+      path.join(root, 'main.js'),
+      `import {lumiana} from ${JSON.stringify(client)};globalThis.instance=lumiana;`,
+    );
+    await build({
+      root,
+      configFile: false,
+      logLevel: 'silent',
+      build: { minify: false, target: 'esnext' },
+    });
+    const assets = path.join(root, 'dist/assets');
+    const output = (
+      await Promise.all(
+        (await fs.readdir(assets)).map((file) => fs.readFile(path.join(assets, file), 'utf8')),
+      )
+    ).join('\n');
+    assert.doesNotMatch(output, /__vite-browser-external/);
+    assert.doesNotMatch(output, /node:buffer/);
+  } finally {
+    await fs.rm(root, { recursive: true, force: true });
+  }
+});
+
 test('Vite keeps package JavaScript local and deploys only detected native addons', async (t) => {
   const previous = [process.env.LUMIANA_USERNAME, process.env.LUMIANA_PASSWORD];
   t.after(() => {

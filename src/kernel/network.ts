@@ -1,7 +1,8 @@
 import net, { type Server, type Socket } from 'node:net';
 import WebSocket from 'ws';
 import tls from 'node:tls';
-import { TlsContexts, tlsInfo, type NativeCallbacks } from './tls-contexts.js';
+import { TlsContexts, tlsInfo } from './tls-contexts.js';
+import type { NativeCallbacks } from './callbacks.js';
 
 export type KernelEvent = (handle: number, event: string, ...args: any[]) => void;
 

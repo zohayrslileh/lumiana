@@ -6,6 +6,7 @@ import { NetworkKernel } from './kernel/network.js';
 import { SystemKernel } from './kernel/system.js';
 import { ChildProcessKernel } from './kernel/child-process.js';
 import { AddonKernel } from './kernel/addons.js';
+import { SQLiteKernel } from './kernel/sqlite.js';
 
 if (!parentPort) throw new Error('Lumiana requires a worker thread');
 const port = parentPort;
@@ -72,6 +73,10 @@ const network = new NetworkKernel(kernelEvent, allocateHandle, {
 const system = new SystemKernel();
 const children = new ChildProcessKernel(kernelEvent, allocateHandle);
 const addons = new AddonKernel(workerData.root, allocateHandle, invokeCallback);
+const sqlite = new SQLiteKernel(allocateHandle, {
+  sync: (id, args) => invokeCallback(id, undefined, args, true),
+  async: invokeCallbackAsync,
+});
 
 const decodeArguments = (values: any[]) => values.map((value) => decodeValue(value));
 const result = (id: number, value: any) =>
@@ -82,6 +87,7 @@ const reject = (id: number, error: unknown) =>
 async function close(): Promise<void> {
   await Promise.all([files.close(), network.close(), children.close()]);
   addons.close();
+  sqlite.close();
   process.exit(0);
 }
 
@@ -106,16 +112,18 @@ function handle(message: any): void {
     if (invocation.operation === 'kernel') {
       const kernel = operation.startsWith('fs.')
         ? files
-        : operation.startsWith('addon.')
-          ? addons
-          : operation.startsWith('net.') ||
-              operation.startsWith('tls.') ||
-              operation.startsWith('fetch.') ||
-              operation.startsWith('websocket.')
-            ? network
-            : operation.startsWith('child.')
-              ? children
-              : network;
+        : operation.startsWith('sqlite.')
+          ? sqlite
+          : operation.startsWith('addon.')
+            ? addons
+            : operation.startsWith('net.') ||
+                operation.startsWith('tls.') ||
+                operation.startsWith('fetch.') ||
+                operation.startsWith('websocket.')
+              ? network
+              : operation.startsWith('child.')
+                ? children
+                : network;
       void kernel.execute(operation, args).then(
         (value) => result(message.id, value),
         (error) => reject(message.id, error),
@@ -129,17 +137,19 @@ function handle(message: any): void {
       try {
         value = operation.startsWith('fs.')
           ? files.executeSync(operation, args)
-          : operation.startsWith('addon.')
-            ? addons.executeSync(operation, args)
-            : operation.startsWith('tls.') || operation.startsWith('net.')
-              ? network.executeSync(operation, args)
-              : operation.startsWith('os.') ||
-                  operation.startsWith('child.') ||
-                  operation.startsWith('system.')
-                ? system.executeSync(operation, args)
-                : (() => {
-                    throw new TypeError(`Unknown synchronous operation ${operation}`);
-                  })();
+          : operation.startsWith('sqlite.')
+            ? sqlite.executeSync(operation, args)
+            : operation.startsWith('addon.')
+              ? addons.executeSync(operation, args)
+              : operation.startsWith('tls.') || operation.startsWith('net.')
+                ? network.executeSync(operation, args)
+                : operation.startsWith('os.') ||
+                    operation.startsWith('child.') ||
+                    operation.startsWith('system.')
+                  ? system.executeSync(operation, args)
+                  : (() => {
+                      throw new TypeError(`Unknown synchronous operation ${operation}`);
+                    })();
       } finally {
         context = previous;
       }

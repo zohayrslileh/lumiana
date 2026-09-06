@@ -49,6 +49,7 @@ const runtimeBuiltins: Record<string, string> = Object.assign(Object.create(null
   os: 'runtime/os.js',
   perf_hooks: 'runtime/perf-hooks.js',
   process: 'runtime/process.js',
+  sqlite: 'runtime/sqlite.js',
   'stream/promises': 'runtime/stream-promises.js',
   timers: 'runtime/timers.js',
   tls: 'runtime/tls.js',

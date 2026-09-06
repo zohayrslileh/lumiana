@@ -1,9 +1,5 @@
 import tls from 'node:tls';
-
-export interface NativeCallbacks {
-  sync: (id: number, args: any[]) => any;
-  async: (id: number, args: any[]) => Promise<any>;
-}
+import type { NativeCallbacks } from './callbacks.js';
 
 /** Negotiated state is immutable between handshakes and travels with the socket event. */
 export function tlsInfo(socket: tls.TLSSocket) {

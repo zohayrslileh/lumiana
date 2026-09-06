@@ -49,6 +49,8 @@ test('createRequire keeps portable CommonJS constructors local', () => {
   assert.equal(new EventEmitter() instanceof EventEmitter, true);
   assert.equal(new stream.PassThrough() instanceof stream.PassThrough, true);
   assert.equal(typeof assertModule.equal, 'function');
+  assert.equal(require('sqlite'), require('node:sqlite'));
+  assert.equal(typeof require('node:sqlite').DatabaseSync, 'function');
 });
 
 test('crypto and compression execute locally with binary Node-compatible values', () => {

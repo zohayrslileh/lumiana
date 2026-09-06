@@ -40,6 +40,61 @@ export function requiresNodeResolution(source: string): boolean {
   let required = false;
 
   const nodeBuiltin = (value: unknown) => typeof value === 'string' && isBuiltin(value);
+  const typeofName = (node: any, name: string) => {
+    node = unwrapExpression(node);
+    const argument = unwrapExpression(node?.argument);
+    return (
+      node?.type === 'UnaryExpression' &&
+      node.operator === 'typeof' &&
+      argument?.type === 'Identifier' &&
+      argument.name === name
+    );
+  };
+  const provesPresent = (node: any, name: string, truthy: boolean): boolean => {
+    node = unwrapExpression(node);
+    if (!node) return false;
+    if (node.type === 'UnaryExpression' && node.operator === '!')
+      return provesPresent(node.argument, name, !truthy);
+    if (node.type === 'LogicalExpression') {
+      if ((node.operator === '&&' && truthy) || (node.operator === '||' && !truthy))
+        return provesPresent(node.left, name, truthy) || provesPresent(node.right, name, truthy);
+      if ((node.operator === '||' && truthy) || (node.operator === '&&' && !truthy))
+        return provesPresent(node.left, name, truthy) && provesPresent(node.right, name, truthy);
+      return false;
+    }
+    if (!['BinaryExpression', 'LogicalExpression'].includes(node.type)) return false;
+    const leftTypeof = typeofName(node.left, name);
+    const rightTypeof = typeofName(node.right, name);
+    const value = leftTypeof ? node.right : rightTypeof ? node.left : undefined;
+    if (!value || value.type !== 'StringLiteral') return false;
+    const equality = node.operator === '===' || node.operator === '==';
+    const inequality = node.operator === '!==' || node.operator === '!=';
+    if (!equality && !inequality) return false;
+    const equalOnBranch = equality === truthy;
+    return value.value === 'undefined' ? !equalOnBranch : equalOnBranch;
+  };
+  const guardedAmbient = (path: any, name: string) => {
+    let child = path;
+    for (let parent = path.parentPath; parent; child = parent, parent = parent.parentPath) {
+      const node = parent.node;
+      if (typeofName(node, name) && child.node === unwrapExpression(node.argument)) return true;
+      if (
+        node.type === 'LogicalExpression' &&
+        child.key === 'right' &&
+        ((node.operator === '&&' && provesPresent(node.left, name, true)) ||
+          (node.operator === '||' && provesPresent(node.left, name, false)))
+      )
+        return true;
+      if (
+        (node.type === 'IfStatement' || node.type === 'ConditionalExpression') &&
+        child.key !== 'test' &&
+        provesPresent(node.test, name, child.key === 'consequent')
+      )
+        return true;
+      if (parent.isFunction?.() || parent.isProgram?.()) break;
+    }
+    return false;
+  };
   const viteEnvironment = (path: any) => {
     const environment = path.parentPath?.node;
     const variable = path.parentPath?.parentPath?.node;
@@ -83,7 +138,7 @@ export function requiresNodeResolution(source: string): boolean {
       if (
         path.node.name === 'process' &&
         !path.scope.getBinding('process') &&
-        path.parentPath?.node.type !== 'UnaryExpression' &&
+        !guardedAmbient(path, 'process') &&
         !viteEnvironment(path)
       )
         required = true;

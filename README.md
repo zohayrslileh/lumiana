@@ -207,6 +207,8 @@ Lumiana currently provides browser-owned contracts for:
 - `node:http2` sessions, multiplexed streams, server push, settings, ping, and flow control
 - `node:tls` connections and servers, including upgrades of existing TCP sockets
 - `node:child_process`, including local streams and lifecycle events
+- `node:sqlite`, including prepared statements, sessions, changesets, tagged-statement caching,
+  user functions, aggregates, authorizers, serialization, and backup
 - `node:os` and local stable system information
 - `node:crypto` and `node:zlib`
 - `node:module`, including source-relative `createRequire()`

@@ -21,6 +21,7 @@ export default defineConfig({
     'runtime/os': 'src/runtime/os.ts',
     'runtime/perf-hooks': 'src/runtime/perf-hooks.ts',
     'runtime/process': 'src/runtime/process.ts',
+    'runtime/sqlite': 'src/runtime/sqlite.ts',
     'runtime/stream-promises': 'src/runtime/stream-promises.ts',
     'runtime/timers': 'src/runtime/timers.ts',
     'runtime/tls': 'src/runtime/tls.ts',
