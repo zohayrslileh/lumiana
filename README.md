@@ -294,5 +294,8 @@ bun install
 bun run dev
 ```
 
+The complete xterm.js and `node-pty` example is in `examples/terminal`. Use the same commands with
+`cd examples/terminal` to run it.
+
 The playground has separate dependencies. Run `bun install` inside `playground` before using its
 scripts.
