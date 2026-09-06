@@ -3,7 +3,6 @@ import assert from 'node:assert/strict';
 import { once } from 'node:events';
 import http from 'node:http';
 import { NetworkKernel } from '../src/kernel/network.js';
-import { HttpKernel } from '../src/kernel/http.js';
 import { createHttp } from '../src/runtime/http-core.js';
 import { createHttpClient } from '../src/runtime/http-client.js';
 
@@ -15,7 +14,7 @@ function realm() {
     listeners.get(handle)?.(event, args);
   const allocate = () => ++sequence;
   const network = new NetworkKernel(emit, allocate);
-  const server = new HttpKernel(emit, allocate, network);
+
   const subscribe = (handle: number, listener: (event: string, args: any[]) => void) => {
     listeners.set(handle, listener);
     return () => {
@@ -24,13 +23,13 @@ function realm() {
   };
   const call = async (operation: string, ...args: any[]) => {
     commands.push(operation);
-    return (operation.startsWith('net.') ? network : server).execute(operation, args);
+    return network.execute(operation, args);
   };
   return {
     client: createHttpClient(call, subscribe),
     http: createHttp(call, subscribe),
     commands,
-    close: () => server.close(),
+    close: () => network.close(),
   };
 }
 
@@ -76,72 +75,46 @@ test(
   },
 );
 
-test('HTTP incoming stream consumes its buffer before delivering transport close', async () => {
-  const listeners = new Map<number, (event: string, args: any[]) => void>();
-  const runtime = createHttp(
-    async () => ({ handle: 1 }),
-    (handle, listener) => {
-      listeners.set(handle, listener);
-      return () => {
-        listeners.delete(handle);
-      };
-    },
-  );
-  const server = runtime.createServer();
-  await once(server, 'handle');
-  const events: string[] = [];
-  const finished = new Promise<void>((resolve) =>
-    server.on('request', (req: any) => {
-      req.on('data', (chunk: Buffer) => events.push(chunk.toString()));
-      req.on('end', () => events.push('end'));
-      req.on('close', () => {
-        events.push('close');
-        resolve();
+test(
+  'HTTP request end/close and response finish/close preserve stream ordering',
+  { timeout: 5000 },
+  async () => {
+    const runtime = realm();
+    const events: string[] = [];
+    const server = runtime.http.createServer((req: any, res: any) => {
+      req.on('data', (data: Buffer) => events.push(data.toString()));
+      req.on('end', () => {
+        events.push('end');
+        res.end('response');
       });
-    }),
-  );
-  listeners.get(1)!('request', [{ request: 2, response: 3, socket: {}, complete: false }]);
-  listeners.get(2)!('data', [Buffer.from('body')]);
-  listeners.get(2)!('end', []);
-  listeners.get(2)!('close', []);
-  await finished;
-  assert.deepEqual(events, ['body', 'end', 'close']);
-});
-
-test('HTTP response emits finish once, followed by close, after its writes settle', async () => {
-  const listeners = new Map<number, (event: string, args: any[]) => void>();
-  const runtime = createHttp(
-    async (operation, handle) => {
-      if (operation === 'http.response.end') {
-        listeners.get(handle)!('finish', []);
-        listeners.get(handle)!('close', []);
-      }
-      return { handle: 1 };
-    },
-    (handle, listener) => {
-      listeners.set(handle, listener);
-      return () => {
-        listeners.delete(handle);
-      };
-    },
-  );
-  const server = runtime.createServer();
-  await once(server, 'handle');
-  const events: string[] = [];
-  const finished = new Promise<void>((resolve) =>
-    server.on('request', (_req: any, res: any) => {
+      req.on('close', () => events.push('request-close'));
       res.on('finish', () => events.push('finish'));
-      res.on('close', () => {
-        events.push('close');
-        resolve();
+      res.on('close', () => events.push('response-close'));
+    });
+    server.listen(0, '127.0.0.1');
+    await once(server, 'listening');
+    try {
+      const request = http.request({
+        host: '127.0.0.1',
+        port: server.address().port,
+        method: 'POST',
+        agent: false,
       });
-      res.end('response');
-    }),
-  );
-  listeners.get(1)!('request', [{ request: 2, response: 3, socket: {}, complete: false }]);
-  await finished;
-  assert.deepEqual(events, ['finish', 'close']);
-});
+      const response = once(request, 'response');
+      request.end('body');
+      const [incoming] = await response;
+      incoming.resume();
+      await once(incoming, 'end');
+      await new Promise((resolve) => setImmediate(resolve));
+      assert.equal(events.filter((event) => event === 'finish').length, 1);
+      assert.ok(events.indexOf('body') < events.indexOf('end'));
+      assert.ok(events.indexOf('end') < events.indexOf('request-close'));
+      assert.ok(events.indexOf('finish') < events.indexOf('response-close'));
+    } finally {
+      await runtime.close();
+    }
+  },
+);
 
 test(
   'HTTP upgrade hands over a duplex socket and preserves bytes after headers',

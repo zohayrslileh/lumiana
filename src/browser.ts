@@ -51,12 +51,12 @@ interface Connection {
   key: string;
   pending: Map<number, { resolve: (v: any) => void; reject: (e: Error) => void }>;
   sequence: number;
+  callbacks: Map<number, (receiver: any, args: any[]) => any>;
+  callbackHandles: WeakMap<Function, number>;
+  callbackSequence: number;
   addons: {
     values: Map<number, any>;
     handles: WeakMap<object, number>;
-    callbacks: Map<number, Function>;
-    callbackHandles: WeakMap<Function, number>;
-    sequence: number;
   };
 }
 interface Context {
@@ -166,7 +166,7 @@ function close(c: Connection, error = new Error('Lumiana is disconnected')): voi
   for (const promise of c.pending.values()) promise.reject(error);
   c.pending.clear();
   c.addons.values.clear();
-  c.addons.callbacks.clear();
+  c.callbacks.clear();
 }
 function project(c: Connection, packet: any): void {
   if (packet.type === 'console') {
@@ -188,29 +188,43 @@ function project(c: Connection, packet: any): void {
     c.socket.close();
   }
 }
-function addonCallback(c: Connection, packet: any): any {
-  const callback = c.addons.callbacks.get(packet.callback);
-  if (!callback) throw new ReferenceError(`Unknown native-addon callback ${packet.callback}`);
-  const receiver = materializeAddon(c, decodeValue(packet.receiver));
-  const args = decodeValue(packet.args).map((value: any) => materializeAddon(c, value));
-  return Reflect.apply(callback, receiver, args);
+function registerCallback(
+  c: Connection,
+  callback: Function,
+  execute = (receiver: any, args: any[]) => Reflect.apply(callback, receiver, args),
+): number {
+  let id = c.callbackHandles.get(callback);
+  if (id === undefined) {
+    id = ++c.callbackSequence;
+    c.callbackHandles.set(callback, id);
+    c.callbacks.set(id, execute);
+  }
+  return id;
+}
+function executeCallback(c: Connection, packet: any): any {
+  const execute = c.callbacks.get(packet.callback);
+  if (!execute) throw new ReferenceError(`Unknown native callback ${packet.callback}`);
+  const value = execute(decodeValue(packet.receiver), decodeValue(packet.args));
+  if (packet.synchronous && value && typeof value.then === 'function')
+    throw new TypeError('A synchronous native callback cannot return a Promise');
+  return value;
 }
 
-function addonCallbackResult(c: Connection, packet: any): any {
+function callbackResult(c: Connection, packet: any): any {
   try {
-    const value = addonCallback(c, packet);
+    const value = executeCallback(c, packet);
     if (value && typeof value.then === 'function')
-      throw new TypeError('A synchronous native-addon callback cannot return a Promise');
+      throw new TypeError('A synchronous native callback cannot return a Promise');
     return {
-      type: 'addon-callback-result',
+      type: 'callback-result',
       id: packet.id,
       context: packet.context,
       ok: true,
-      value: encodeValue(packAddon(c, value)),
+      value: encodeValue(value),
     };
   } catch (error) {
     return {
-      type: 'addon-callback-result',
+      type: 'callback-result',
       id: packet.id,
       context: packet.context,
       ok: false,
@@ -232,8 +246,8 @@ function sync(c: Connection, invocation: Invocation): any {
       throw new Error(xhr.responseText || `Lumiana request failed (${xhr.status})`);
     const reply = decodePacket(Buffer.from(xhr.responseText, 'base64'));
     for (const log of reply.logs ?? []) project(c, log);
-    if (reply.type === 'addon-callback') {
-      packet = addonCallbackResult(c, reply);
+    if (reply.type === 'callback') {
+      packet = callbackResult(c, reply);
       continue;
     }
     if (!reply.ok) throw decodeException(reply.error);
@@ -285,12 +299,12 @@ export const connect = {
         key,
         pending: new Map(),
         sequence: 0,
+        callbacks: new Map(),
+        callbackHandles: new WeakMap(),
+        callbackSequence: 0,
         addons: {
           values: new Map(),
           handles: new WeakMap(),
-          callbacks: new Map(),
-          callbackHandles: new WeakMap(),
-          sequence: 0,
         },
       };
       await new Promise<void>((resolve, reject) => {
@@ -311,6 +325,7 @@ export const connect = {
                     operation: 'kernelSync',
                     args: [operation, ...args].map((value) => encodeValue(value)),
                   }),
+                (callback) => registerCallback(c, callback),
               );
               resolve();
               return;
@@ -323,18 +338,18 @@ export const connect = {
               dispatchKernel(packet.handle, packet.event, decodeValue(packet.value));
               return;
             }
-            if (packet.type === 'addon-callback') {
+            if (packet.type === 'callback') {
               Promise.resolve()
-                .then(() => addonCallback(c, packet))
+                .then(() => executeCallback(c, packet))
                 .then(
                   (value) => ({
-                    type: 'addon-callback-result',
+                    type: 'callback-result',
                     id: packet.id,
                     ok: true,
-                    value: encodeValue(packAddon(c, value)),
+                    value: encodeValue(value),
                   }),
                   (error) => ({
-                    type: 'addon-callback-result',
+                    type: 'callback-result',
                     id: packet.id,
                     ok: false,
                     error: encodeException(error),
@@ -381,12 +396,16 @@ function packAddon(c: Connection, value: any, seen = new Map<any, any>()): any {
   const handle = object ? c.addons.handles.get(value) : undefined;
   if (handle !== undefined) return { __lumianaAddon: handle };
   if (typeof value === 'function') {
-    let id = c.addons.callbackHandles.get(value);
-    if (id === undefined) {
-      id = ++c.addons.sequence;
-      c.addons.callbackHandles.set(value, id);
-      c.addons.callbacks.set(id, value);
-    }
+    const id = registerCallback(c, value, (receiver, args) => {
+      const result: any = Reflect.apply(
+        value,
+        materializeAddon(c, receiver),
+        args.map((arg: any) => materializeAddon(c, arg)),
+      );
+      return result && typeof result.then === 'function'
+        ? result.then((value: any) => packAddon(c, value))
+        : packAddon(c, result);
+    });
     return { __lumianaCallback: id };
   }
   if (!value || typeof value !== 'object') return value;

@@ -117,7 +117,16 @@ synchronous replies use gzip around the required text envelope.
 Native addons may invoke a browser callback before a synchronous native call returns. In that
 case, the synchronous response carries the callback request, the browser executes its local
 function, and a continuation returns the copied result. The Worker waits on its message port so the
-native stack remains intact. Asynchronous addon callbacks use the WebSocket.
+native stack remains intact. This callback contract is also used by native TLS operations. SNI
+selection may complete asynchronously over the WebSocket; ALPN and PSK selection remain
+synchronous because the native TLS stack requires an immediate return. Asynchronous addon
+callbacks use the WebSocket.
+
+HTTP is not an engine domain. HTTP/1 parsing and response framing, HTTP/2 framing and HPACK,
+stream flow control, multiplexing, and Agent scheduling execute in the browser over the socket
+capability. TLS hostname matching also executes in the browser from the copied peer certificate.
+The engine retains the TCP or Unix socket, native TLS state, secure contexts, and other system
+resources that JavaScript cannot own locally.
 
 Each authenticated connection owns one Worker and its resource handles. Closing the browser side,
 the Worker, or the host invalidates the whole connection. Handles from a closed connection cannot
@@ -126,7 +135,9 @@ be reused by a later connection.
 ## Known incomplete domains
 
 The architecture deliberately reports an unsupported local contract where behavior is not yet
-implemented. Current incomplete areas include HTTP clients, TLS, HTTP/2, DNS, UDP, worker threads,
-async context, complete VM isolation, advanced filesystem descriptors and streams, and some
-process and child-process behavior. These are runtime-domain gaps, not reasons to externalize a
-consumer package.
+implemented. Current incomplete areas include HTTP/2 file-descriptor response helpers and
+ORIGIN/ALTSVC extensions, TLS session-cache and OCSP callbacks, complete HTTP server deadline
+enforcement, DNS, UDP, async context, complete VM isolation and V8 introspection, advanced
+filesystem descriptors and streams, and some process and child-process behavior. Worker threads
+have a browser-owned compatibility contract, but their full Node semantics are not yet established.
+These are runtime-domain gaps, not reasons to externalize a consumer package.

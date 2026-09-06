@@ -28,8 +28,9 @@ resuming work. Verify details against source and never store credentials or secr
   reports the main server. `lumiana.disconnect()` ends the connection and its dedicated Worker.
 - Plugin credentials live in `defaultCredentials`. `LUMIANA_USERNAME` and `LUMIANA_PASSWORD`
   override them. Standalone production also reads `LUMIANA_HOST` and `LUMIANA_PORT`.
-- There is no `node()`, public `Buffer`, root `lumiana` entry, `nodeModules` option, package
-  allowlist, or manual externalization API.
+- There is no `node()`, public `Buffer`, or package allowlist. The plugin is currently exported from
+  `lumiana/vite`; the requested root `lumiana` export and `nodeModules` plugin option have not yet
+  been restored.
 - Vite development, Vite preview, and standalone production are supported.
 
 ## Architecture
@@ -79,12 +80,25 @@ resuming work. Verify details against source and never store credentials or secr
 - Unqualified `fetch` and `WebSocket` use hybrid routing. Same-origin traffic stays in the browser;
   other origins use the native network capability. Explicit `window.fetch` and `window.WebSocket`
   stay in the browser.
+- HTTP is a browser runtime domain. HTTP/1 parsing and response framing, HTTP/2 framing and HPACK,
+  flow control, multiplexing, and HTTP/HTTPS Agent scheduling stay local. The engine retains only
+  the underlying sockets and native TLS resources.
+- TLS certificate-chain validation and encryption remain native. Hostname matching, SNI, ALPN,
+  PSK, and renegotiation completion callbacks execute in the browser. SNI may complete
+  asynchronously; callbacks that the native TLS stack requires synchronously reject Promise
+  results.
 
 ## Implemented runtime domains
 
 - `node:fs`: callback, Promise, synchronous, stream, and watcher forms.
 - `node:net`: TCP and Unix sockets with local Socket and Server objects.
-- `node:http`: server-side listener, request, and response objects.
+- `node:http` and `node:https`: local client and server framing, streaming, upgrades, keep-alive,
+  Agent pooling, request queues, connection limits, and custom connection factories.
+- `node:http2`: client and server sessions over cleartext or TLS, HPACK, multiplexed streams,
+  settings, ping, flow control, trailers, informational headers, server push, graceful shutdown,
+  and secure HTTP/1 fallback.
+- `node:tls`: client and server sockets, TCP upgrades, certificate validation, local hostname
+  matching, secure contexts, ticket keys, SNI, ALPN, PSK, and TLS 1.2 renegotiation.
 - `node:child_process`: local lifecycle objects, streams, callbacks, Promise customization, IPC
   commands, and synchronous variants.
 - Local or snapshot-backed `assert`, `buffer`, `crypto`, `events`, `module`, `os`, `path`,
@@ -116,14 +130,34 @@ resuming work. Verify details against source and never store credentials or secr
 - The value serializer must reject object-shaped behavior. Class prototypes can have
   `Object.prototype` while carrying non-enumerable methods; copying them as records breaks
   prototypes and `instanceof`.
+- HTTP/HTTPS Agents reuse sockets without engine scheduling calls. Pool keys distinguish TLS
+  context and validation identities, and queued requests obey per-origin and total connection
+  limits.
+- HTTP/2 interoperates in both directions with native Node peers. Its protocol machinery remains
+  local, coalesces outgoing frames, rejects invalid settings, handles repeated identical ping
+  payloads, and closes requests queued before connection without leaving them pending.
+- The compatibility suite now contains 16 browser examples. All 16 passed in Vite development,
+  Vite production preview, and standalone production launched from the repository root. The root
+  suite passed 72 tests; typecheck, formatting, root build, example build, and standalone native
+  dependency installation passed. These counts describe the current uncommitted worktree and must
+  be updated when the suite changes.
 
 ## Remaining runtime domains
 
 - Complete file-descriptor mutation, incremental file streams, directory handles, recursive
   watcher parity, and full filesystem metadata.
-- HTTP clients and upgrades, full backpressure, TLS, and HTTP/2.
-- DNS, UDP, worker threads, async context, and process lifecycle.
+- HTTP/2 file-descriptor response helpers, ORIGIN/ALTSVC extensions, broader protocol error
+  validation, and sustained-load validation.
+- TLS session-cache and OCSP callbacks, plus broader certificate and platform coverage.
+- Complete HTTP server deadline enforcement and broader backpressure/load validation.
+- Restore the `nodeModules` plugin option so users can explicitly exclude packages while automatic
+  placement continues to bundle every package that can consume browser runtime contracts.
+- Export the plugin from the package root so `import { lumiana } from 'lumiana'` is supported while
+  `lumiana/client` remains the browser entry.
+- DNS, UDP, full worker-thread semantics, async context, and process lifecycle.
 - Complete VM context semantics, V8 introspection, advanced child-process stdio and error metadata,
   and broader real native-addon fixtures.
+- Cross-machine deployment behavior and Windows filesystem/network behavior need their own
+  validation environments.
 - A general compiler transaction model that can lift synchronous-looking source into asynchronous
   WebSocket operations where program semantics permit it.

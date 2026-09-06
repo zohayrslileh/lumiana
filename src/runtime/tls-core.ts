@@ -1,3 +1,4 @@
+import { checkServerIdentity } from './tls-identity.js';
 import { Buffer } from 'buffer';
 import { createNetwork, socketOptions, type KernelSubscribe } from './network.js';
 import type { KernelCall } from './filesystem.js';
@@ -9,6 +10,9 @@ export function createTls(
   subscribe: KernelSubscribe,
   sync: SyncCall,
   network = createNetwork(call, subscribe),
+  registerCallback: (callback: Function) => number = () => {
+    throw new Error('Native callback registry is unavailable');
+  },
 ): any {
   const contexts = new WeakMap<object, number>();
   const contextOptions = (options: any = {}) => {
@@ -30,6 +34,7 @@ export function createTls(
       'minVersion',
       'passphrase',
       'pfx',
+      'pskIdentityHint',
       'privateKeyEngine',
       'privateKeyIdentifier',
       'rejectUnauthorized',
@@ -54,8 +59,39 @@ export function createTls(
         throw new TypeError('secureContext must be created by tls.createSecureContext');
       result.secureContext = handle;
     }
-    for (const key of ['SNICallback', 'ALPNCallback', 'pskCallback'])
-      if (options[key] !== undefined) throw new TypeError(`tls.${key} is not implemented`);
+    if (options.SNICallback)
+      result.SNICallback = registerCallback(
+        (servername: string) =>
+          new Promise((resolve, reject) => {
+            options.SNICallback(servername, (error: Error | null, context?: object) => {
+              if (error) {
+                reject(error);
+                return;
+              }
+              const handle = !context ? undefined : contexts.get(context);
+              if (context && handle === undefined) {
+                reject(new TypeError('SNI must return a SecureContext'));
+                return;
+              }
+              resolve(handle);
+            });
+          }),
+      );
+    if (options.ALPNCallback)
+      result.ALPNCallback = registerCallback((input: any) => options.ALPNCallback(input));
+    if (options.pskCallback)
+      result.pskCallback = registerCallback((...args: any[]) => {
+        const values = args.map((arg) =>
+          arg && typeof arg === 'object' && arg.handle !== undefined
+            ? network.socketFor(arg, TLSSocket)
+            : arg,
+        );
+        return Reflect.apply(
+          options.pskCallback,
+          values[0] instanceof TLSSocket ? values[0] : undefined,
+          values,
+        );
+      });
     return result;
   };
   function normalize(args: any[]) {
@@ -86,13 +122,12 @@ export function createTls(
         typeof options.checkServerIdentity !== 'function'
       )
         throw new TypeError('checkServerIdentity must be a function');
-      this.identity = options.checkServerIdentity;
+      this.identity = options.checkServerIdentity ?? checkServerIdentity;
       this.rejectUnauthorized = options.rejectUnauthorized !== false;
       this.hostname = options.servername || options.host || 'localhost';
       const input = {
         ...socketOptions([options]),
         ...contextOptions(options),
-        customIdentity: Boolean(this.identity),
       };
       if (options.socket) {
         void network.takeSocket(options.socket).then(
@@ -110,7 +145,9 @@ export function createTls(
       return this.open('tls.connect', input);
     }
     protected incoming(event: string, args: any[]) {
-      if (event === 'connect') {
+      if (event === 'tlsState') {
+        Object.assign(this, args[0]);
+      } else if (event === 'connect') {
         Object.assign(this, args[0]);
         this.connecting = false;
         this.emit('connect');
@@ -187,6 +224,12 @@ export function createTls(
     exportKeyingMaterial(length: number, label: string, context?: Uint8Array) {
       return sync('tls.socket', this.handle, 'exportKeyingMaterial', length, label, context);
     }
+    renegotiate(options: any, callback: any) {
+      const id = registerCallback((error: any) =>
+        callback(error ? Object.assign(new Error(error.message), error) : null),
+      );
+      return sync('tls.socket', this.handle, 'renegotiate', options, id);
+    }
     setMaxSendFragment(size: number) {
       return sync('tls.socket', this.handle, 'setMaxSendFragment', size);
     }
@@ -195,6 +238,19 @@ export function createTls(
     }
   }
   class Server extends network.Server {
+    addContext(hostname: string, context: any) {
+      const handle = contexts.get(context);
+      sync('tls.serverMethod', this.handle, 'addContext', hostname, handle ?? context);
+    }
+    setSecureContext(options: any) {
+      sync('tls.serverMethod', this.handle, 'setSecureContext', contextOptions(options));
+    }
+    getTicketKeys() {
+      return sync('tls.serverMethod', this.handle, 'getTicketKeys');
+    }
+    setTicketKeys(keys: Uint8Array) {
+      sync('tls.serverMethod', this.handle, 'setTicketKeys', keys);
+    }
     constructor(options?: any, listener?: any) {
       if (typeof options === 'function') {
         listener = options;
@@ -211,10 +267,6 @@ export function createTls(
     const context = {};
     contexts.set(context, sync('tls.context', contextOptions(options)).handle);
     return context;
-  }
-  function checkServerIdentity(hostname: string, certificate: any) {
-    const error = sync('tls.checkServerIdentity', hostname, certificate);
-    return error ? Object.assign(new Error(error.message), error) : undefined;
   }
   const connect = (...args: any[]) => new TLSSocket().connect(...args);
   const createServer = (options?: any, listener?: any) => new Server(options, listener);

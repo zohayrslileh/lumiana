@@ -4,11 +4,18 @@ import { HTTPParser } from 'http-parser-js';
 import { createNetwork, type KernelSubscribe } from './network.js';
 import type { KernelCall } from './filesystem.js';
 
+interface HttpTransport {
+  protocol: string;
+  defaultPort: number;
+  createConnection: (...args: any[]) => any;
+  globalAgent?: any;
+}
+
 /** HTTP framing stays local; the transport owns only the underlying byte stream. */
 export function createHttpClient(
   call: KernelCall,
   subscribe: KernelSubscribe,
-  transport = {
+  transport: HttpTransport = {
     protocol: 'http:',
     defaultPort: 80,
     createConnection: createNetwork(call, subscribe).createConnection,
@@ -21,6 +28,15 @@ export function createHttpClient(
     path: string;
     host: string;
     protocol: string;
+    agent: any;
+    reusedSocket = false;
+    shouldKeepAlive = false;
+    private released = false;
+    private requestFinished = false;
+    private responseEnded = false;
+    private options: any;
+    private reusable = false;
+    private cleanupSocket?: () => void;
     aborted = false;
     headersSent = false;
     private headers = new Map<string, { name: string; value: any }>();
@@ -32,6 +48,22 @@ export function createHttpClient(
       super({ autoDestroy: false });
       const { createConnection, protocol, defaultPort } = connectionTransport;
       this.protocol = protocol;
+      this.options = options;
+      this.agent =
+        options.agent === false || (options.createConnection && options.agent === undefined)
+          ? undefined
+          : (options.agent ?? connectionTransport.globalAgent);
+      if (this.agent && typeof this.agent.addRequest !== 'function')
+        throw new TypeError('Agent must provide addRequest()');
+      if (this.agent?.protocol && this.agent.protocol !== protocol)
+        throw new TypeError('Agent protocol does not match request');
+      this.shouldKeepAlive = Boolean(
+        this.agent && (this.agent.keepAlive || this.agent.maxSockets !== Infinity),
+      );
+      this.once('finish', () => {
+        this.requestFinished = true;
+        this.releaseSocket();
+      });
       if (options.protocol && options.protocol !== protocol)
         throw Object.assign(
           new TypeError(`Protocol ${options.protocol} is not supported by ${protocol}`),
@@ -86,6 +118,14 @@ export function createHttpClient(
           return 1;
         }
         this.response = response;
+        this.reusable =
+          Boolean(info.shouldKeepAlive) &&
+          this.shouldKeepAlive &&
+          String(this.getHeader('connection')).toLowerCase() !== 'close';
+        response.once('end', () => {
+          this.responseEnded = true;
+          this.releaseSocket();
+        });
         if (info.upgrade || (this.method === 'CONNECT' && info.statusCode === 200)) {
           this.upgraded = true;
           return 2;
@@ -107,13 +147,14 @@ export function createHttpClient(
         if (!this.response || this.upgraded) return;
         this.response.complete = true;
         this.response.push(null);
-        this.socket.end();
+        if (!this.reusable) this.socket.end();
+        this.releaseSocket();
       };
       // Defer socket creation so listeners can observe synchronous connection failures too.
       queueMicrotask(() => {
         if (this.destroyed) return;
         try {
-          this.socket = this.connection = (options.createConnection ?? createConnection)({
+          const connectionOptions = {
             ...options,
             host: this.host,
             port: options.port ?? defaultPort,
@@ -126,27 +167,76 @@ export function createHttpClient(
                       : this.host,
                 }
               : {}),
-          });
-          this.socket.on('data', this.onData);
-          this.socket.on('error', (error: Error) => this.destroy(error));
-          this.socket.on('end', () => {
-            if (this.upgraded) return;
-            const error = this.parser.finish();
-            if (error) this.destroy(error);
-          });
-          this.socket.on('close', () => {
-            if (this.upgraded) return;
-            if (!this.response?.complete && !this.destroyed)
-              this.destroy(Object.assign(new Error('socket hang up'), { code: 'ECONNRESET' }));
-            else if (!this.destroyed) this.destroy();
-          });
-          if (options.timeout) this.setTimeout(options.timeout);
-          this.emit('socket', this.socket);
-          this.emit('assigned');
+          };
+          if (this.agent) this.agent.addRequest(this, connectionOptions);
+          else {
+            let assigned = false;
+            const ready = (error: Error | null, socket?: any) => {
+              if (assigned) return;
+              assigned = true;
+              this.onSocket(socket, error);
+            };
+            const socket = (options.createConnection ?? createConnection)(connectionOptions, ready);
+            if (socket) ready(null, socket);
+          }
         } catch (error) {
           this.destroy(error as Error);
         }
       });
+    }
+    onSocket(socket: any, error?: Error | null) {
+      if (error) {
+        this.destroy(error);
+        return;
+      }
+      if (this.destroyed) {
+        socket?.destroy();
+        return;
+      }
+      this.socket = this.connection = socket;
+      const failed = (error: Error) => this.destroy(error);
+      const ended = () => {
+        if (this.upgraded) return;
+        const error = this.parser.finish();
+        if (error) this.destroy(error);
+      };
+      const closed = () => {
+        if (this.upgraded || this.released) return;
+        if (!this.response?.complete && !this.destroyed)
+          this.destroy(Object.assign(new Error('socket hang up'), { code: 'ECONNRESET' }));
+        else if (!this.destroyed) this.destroy();
+      };
+      const timedOut = () => this.emit('timeout');
+      socket.on('data', this.onData);
+      socket.on('error', failed);
+      socket.on('end', ended);
+      socket.on('close', closed);
+      socket.on('timeout', timedOut);
+      this.cleanupSocket = () => {
+        socket.off('data', this.onData);
+        socket.off('error', failed);
+        socket.off('end', ended);
+        socket.off('close', closed);
+        socket.off('timeout', timedOut);
+      };
+      if (this.options.timeout) socket.setTimeout(this.options.timeout);
+      this.emit('socket', socket);
+      this.emit('assigned');
+    }
+    private releaseSocket() {
+      if (
+        this.released ||
+        this.upgraded ||
+        !this.response?.complete ||
+        !this.responseEnded ||
+        !this.requestFinished
+      )
+        return;
+      this.released = true;
+      this.cleanupSocket?.();
+      if (this.reusable && !this.socket.destroyed) this.socket.emit('free');
+      else this.socket.destroy();
+      this.destroy();
     }
     private onData = (chunk: Buffer) => {
       const consumed = this.parser.execute(chunk);
@@ -155,7 +245,9 @@ export function createHttpClient(
         return;
       }
       if (this.upgraded) {
-        this.socket.removeListener('data', this.onData);
+        this.cleanupSocket?.();
+        this.released = true;
+        this.socket.emit('agentRemove');
         const event = this.method === 'CONNECT' ? 'connect' : 'upgrade';
         if (!this.emit(event, this.response, this.socket, chunk.subarray(consumed)))
           this.socket.destroy();
@@ -190,7 +282,8 @@ export function createHttpClient(
     }
     private head() {
       if (this.headersSent) return Buffer.alloc(0);
-      if (!this.hasHeader('connection')) this.setHeader('Connection', 'close');
+      if (!this.hasHeader('connection'))
+        this.setHeader('Connection', this.shouldKeepAlive ? 'keep-alive' : 'close');
       if (
         !this.hasHeader('content-length') &&
         !this.hasHeader('transfer-encoding') &&
@@ -246,7 +339,7 @@ export function createHttpClient(
     }
     setTimeout(timeout: number, callback?: () => void) {
       if (callback) this.once('timeout', callback);
-      const apply = () => this.socket.setTimeout(timeout, () => this.emit('timeout'));
+      const apply = () => this.socket.setTimeout(timeout);
       if (this.socket) apply();
       else this.once('assigned', apply);
       return this;
@@ -257,7 +350,13 @@ export function createHttpClient(
       this.destroy();
     }
     _destroy(error: Error | null, done: (error?: Error | null) => void) {
-      this.socket?.destroy();
+      this.cleanupSocket?.();
+      if (!this.released) this.socket?.destroy();
+      if (error && this.response && !this.response.complete) {
+        this.response.aborted = true;
+        this.response.emit('aborted');
+        this.response.destroy(error);
+      }
       done(error);
     }
   }

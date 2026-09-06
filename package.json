@@ -30,7 +30,6 @@
   "keywords": [
     "vite",
     "vite-plugin",
-    "backend",
     "lumiana"
   ],
   "license": "MIT",
@@ -60,6 +59,7 @@
     "es-module-lexer": "^2.3.2",
     "esbuild": "^0.28.2",
     "events": "^3.3.0",
+    "hpack.js": "^2.1.6",
     "http-parser-js": "^0.5.10",
     "import-meta-resolve": "^4.2.0",
     "magic-string": "^1.2.3",

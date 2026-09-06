@@ -156,11 +156,9 @@ export function attachHost(server: Server | Http2SecureServer, options: HostOpti
         return;
       }
       const responseId =
-        message.type === 'addon-callback' && message.context !== undefined
-          ? message.context
-          : message.id;
+        message.type === 'callback' && message.context !== undefined ? message.context : message.id;
       const res =
-        message.type === 'result' || message.type === 'addon-callback'
+        message.type === 'result' || message.type === 'callback'
           ? session.responses.get(responseId)
           : undefined;
       if (res) {
@@ -243,10 +241,7 @@ export function attachHost(server: Server | Http2SecureServer, options: HostOpti
           res.end('Lumiana is disconnected');
           return;
         }
-        session.responses.set(
-          packet.type === 'addon-callback-result' ? packet.context : packet.id,
-          res,
-        );
+        session.responses.set(packet.type === 'callback-result' ? packet.context : packet.id, res);
         session.post(packet);
       }
     } catch (error) {

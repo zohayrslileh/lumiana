@@ -48,3 +48,8 @@ declare module 'util/util.js' {
   const util: typeof import('node:util') & Record<string, any>;
   export default util;
 }
+
+declare module 'hpack.js' {
+  const hpack: any;
+  export default hpack;
+}

@@ -51,7 +51,12 @@ const callback = (args: any[]) =>
 
 const error = (value: any) => Object.assign(new Error(value.message), value);
 
-export function createNetwork(call: KernelCall, subscribe: KernelSubscribe): any {
+export function createNetwork(
+  call: KernelCall,
+  subscribe: KernelSubscribe,
+  sync?: (operation: string, ...args: any[]) => any,
+): any {
+  const socketObjects = new Map<number, Socket>();
   const takeHandles = new WeakMap<object, () => Promise<number>>();
   class Socket extends Duplex {
     protected handle?: number;
@@ -91,6 +96,7 @@ export function createNetwork(call: KernelCall, subscribe: KernelSubscribe): any
           });
         const handle = this.handle!;
         this.release?.();
+        socketObjects.delete(handle);
         this.handle = undefined;
         this.writableReady = false;
         return handle;
@@ -100,6 +106,7 @@ export function createNetwork(call: KernelCall, subscribe: KernelSubscribe): any
 
     protected attach(handle: number, info: any = {}) {
       this.handle = handle;
+      socketObjects.set(handle, this);
       Object.assign(this, info);
       this.pending = false;
       this.readyState = 'open';
@@ -127,6 +134,7 @@ export function createNetwork(call: KernelCall, subscribe: KernelSubscribe): any
       else if (event === 'close') {
         this.writableReady = false;
         this.readyState = 'closed';
+        if (this.handle !== undefined) socketObjects.delete(this.handle);
         this.nativeClosed = true;
         this.hadError ||= Boolean(args[0]);
         this.release?.();
@@ -155,6 +163,7 @@ export function createNetwork(call: KernelCall, subscribe: KernelSubscribe): any
         ({ handle }) => {
           this.opening = false;
           this.handle = handle;
+          socketObjects.set(handle, this);
           this.release = subscribe(handle, (event, values) => this.incoming(event, values));
           if (this.destroyed) {
             void call('net.destroy', handle);
@@ -307,18 +316,20 @@ export function createNetwork(call: KernelCall, subscribe: KernelSubscribe): any
       super();
       if (typeof options === 'function') listener = options;
       if (listener) this.on(transport.event, listener);
-      void call(transport.operation, typeof options === 'object' ? options : undefined).then(
-        ({ handle }) => {
-          this.handle = handle;
-          this.release = subscribe(handle, (event, args) => this.incoming(event, args));
-          this.emit('handle');
-        },
-        (reason) => this.emit('error', reason),
-      );
+      const attach = ({ handle }: { handle: number }) => {
+        this.handle = handle;
+        this.release = subscribe(handle, (event, args) => this.incoming(event, args));
+        this.emit('handle');
+      };
+      const input = typeof options === 'object' ? options : undefined;
+      if (sync && transport.operation === 'tls.server') attach(sync(transport.operation, input));
+      else
+        void call(transport.operation, input).then(attach, (reason) => this.emit('error', reason));
     }
 
     private incoming(event: string, args: any[]) {
-      if (event === this.transport.event) this.emit(event, new this.transport.Socket(args[0]));
+      if (event === this.transport.event)
+        this.emit(event, socketFor(args[0], this.transport.Socket));
       else if (event === 'tlsClientError') this.emit(event, error(args[0]));
       else if (event === 'listening') {
         this.bound = args[0];
@@ -368,10 +379,26 @@ export function createNetwork(call: KernelCall, subscribe: KernelSubscribe): any
 
   const createServer = (options?: any, listener?: any) => new Server(options, listener);
   const createConnection = (...args: any[]) => new Socket().connect(...args);
+  const socketFor = (info: any, Constructor = Socket) => {
+    const existing = socketObjects.get(info.handle);
+    if (existing) {
+      Object.assign(existing, info);
+      return existing;
+    }
+    return new Constructor(info);
+  };
   const takeSocket = (socket: object) => {
     const take = takeHandles.get(socket);
     if (!take) throw new TypeError('TLS requires a socket from the same Node runtime');
     return take();
   };
-  return { Socket, Server, createServer, createConnection, connect: createConnection, takeSocket };
+  return {
+    Socket,
+    Server,
+    createServer,
+    createConnection,
+    connect: createConnection,
+    takeSocket,
+    socketFor,
+  };
 }

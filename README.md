@@ -203,7 +203,8 @@ Lumiana currently provides browser-owned contracts for:
 
 - `node:fs`, including callback, Promise, synchronous, stream, and watcher forms
 - `node:net`, including TCP and Unix sockets
-- `node:http` and `node:https` servers, streaming clients, and connection upgrades
+- `node:http` and `node:https` servers, streaming clients, connection upgrades, and Agent pooling
+- `node:http2` sessions, multiplexed streams, server push, settings, ping, and flow control
 - `node:tls` connections and servers, including upgrades of existing TCP sockets
 - `node:child_process`, including local streams and lifecycle events
 - `node:os` and local stable system information
@@ -220,17 +221,37 @@ Worker keeps their operating-system handles. `process.env`, `homedir()`, and `pl
 connection snapshots and make no request when read or serialized.
 
 `node:tty`, `node:perf_hooks`, `node:v8`, and `node:vm` provide their currently supported local
-behavior. `node:http2` currently reports a clear unsupported runtime contract when an
-operational method is called.
+behavior.
 
-TLS uses the connected Worker's native implementation for encryption and certificate validation.
-The browser owns the `TLSSocket`, its streams, and any custom `checkServerIdentity` callback.
-Handshake metadata travels with the connection event, so certificate, cipher, protocol, and
-session getters do not make extra requests. HTTPS uses the same local HTTP parser over TLS.
+HTTP/1 parsing and response framing, HTTP/2 frames and HPACK compression, stream flow control,
+and HTTP/HTTPS Agent scheduling run in the browser over the shared socket contract. Agents
+reuse idle sockets, queue requests within connection limits, and support custom connection
+factories. HTTP/2 coalesces outgoing frames into socket writes and supports verified TLS,
+cleartext connections, and an optional HTTP/1 fallback on secure servers.
 
-TLS support is not yet the complete Node API: callback-based SNI/ALPN selection, PSK callbacks,
-renegotiation, and runtime server context changes remain unimplemented. HTTP Agent pooling and
-custom Agent behavior also remain unimplemented.
+TLS uses the engine's native implementation for encryption and certificate-chain verification.
+The browser owns the `TLSSocket`, its streams, hostname matching, and application callbacks.
+SNI can select a certificate asynchronously; ALPN and PSK callbacks return synchronously.
+Secure contexts and ticket keys remain native resources. Servers can update those resources,
+and TLS 1.2 sockets support renegotiation with browser-owned completion callbacks.
+Handshake metadata travels with connection events, so certificate, cipher, protocol, and
+session getters do not make extra requests.
+
+This is not yet the complete Node networking API. HTTP/2 file-descriptor response helpers and
+ORIGIN/ALTSVC extension APIs, TLS session-cache and OCSP callbacks, and comprehensive HTTP
+server deadline enforcement still need implementation and validation.
+
+## Remaining work
+
+- Export the Vite plugin from the package root so applications can use
+  `import { lumiana } from 'lumiana'` while the browser API remains in `lumiana/client`.
+- Restore the `nodeModules` plugin option for explicit package exclusion. Automatic placement must
+  remain the default and must continue bundling packages that can consume browser runtime
+  contracts.
+- Complete the networking APIs listed above and expand protocol-error, backpressure, sustained-load,
+  cross-machine, and Windows validation.
+- Complete the remaining filesystem, DNS, UDP, worker-thread, async-context, VM, V8, process, and
+  child-process contracts described in `ARCHITECTURE.md`.
 
 Static missing optional dependencies are recorded during the build. A local `createRequire()` then
 throws `MODULE_NOT_FOUND` without contacting the server, allowing the package's own fallback logic

@@ -1,7 +1,7 @@
 import net, { type Server, type Socket } from 'node:net';
 import WebSocket from 'ws';
 import tls from 'node:tls';
-import { TlsContexts, tlsInfo } from './tls-contexts.js';
+import { TlsContexts, tlsInfo, type NativeCallbacks } from './tls-contexts.js';
 
 export type KernelEvent = (handle: number, event: string, ...args: any[]) => void;
 
@@ -13,13 +13,21 @@ export class NetworkKernel {
   private socketListeners = new Map<number, () => void>();
   private servers = new Map<number, Server>();
   private websockets = new Map<number, WebSocket>();
-  readonly tls = new TlsContexts(() => this.next());
+  readonly tls: TlsContexts;
+  private handles = new WeakMap<Socket, number>();
   private requests = new Map<string, AbortController>();
 
   constructor(
     private event: KernelEvent,
     private allocate: () => number = () => ++this.sequence,
-  ) {}
+    private callbacks?: NativeCallbacks,
+  ) {
+    this.tls = new TlsContexts(
+      () => this.next(),
+      callbacks,
+      (socket) => this.adoptSocket(socket),
+    );
+  }
 
   private next(): number {
     return this.allocate();
@@ -56,9 +64,12 @@ export class NetworkKernel {
   }
 
   private attachSocket(socket: Socket, paused = false): number {
+    const existing = this.handles.get(socket);
+    if (existing !== undefined && this.sockets.has(existing)) return existing;
     this.trackSocket(socket);
     const handle = this.next();
     this.sockets.set(handle, socket);
+    this.handles.set(socket, handle);
     const listeners: [string, (...args: any[]) => void][] = [];
     const on = (event: string, listener: (...args: any[]) => void) => {
       listeners.push([event, listener]);
@@ -72,6 +83,7 @@ export class NetworkKernel {
     on('connect', () => this.event(handle, 'connect', this.socketInfo(socket)));
     on('ready', () => this.event(handle, 'ready'));
     if (socket instanceof tls.TLSSocket) {
+      on('secure', () => this.event(handle, 'tlsState', this.socketInfo(socket)));
       on('secureConnect', () => {
         socket.pause();
         this.event(handle, 'secureConnect', this.socketInfo(socket));
@@ -143,11 +155,73 @@ export class NetworkKernel {
     );
   }
 
+  private createServer(operation: string, args: any[]) {
+    const secure = operation === 'tls.server';
+    const server = secure
+      ? tls.createServer(this.tls.options(args[0]))
+      : net.createServer(args[0] ?? {});
+    const handle = this.next();
+    this.servers.set(handle, server);
+    server.on('connection', (socket: Socket) => this.trackSocket(socket));
+    server.on(secure ? 'secureConnection' : 'connection', (socket: Socket) => {
+      const socketHandle = this.attachSocket(socket, true);
+      this.event(handle, secure ? 'secureConnection' : 'connection', {
+        handle: socketHandle,
+        ...this.socketInfo(socket),
+      });
+    });
+    if (secure)
+      server.on('tlsClientError', (error: NodeJS.ErrnoException) =>
+        this.event(handle, 'tlsClientError', {
+          name: error.name,
+          message: error.message,
+          code: error.code,
+        }),
+      );
+    server.on('listening', () => this.event(handle, 'listening', server.address()));
+    server.on('error', (error: NodeJS.ErrnoException & { address?: string; port?: number }) =>
+      this.event(handle, 'error', {
+        name: error.name,
+        message: error.message,
+        stack: error.stack,
+        code: error.code,
+        errno: error.errno,
+        syscall: error.syscall,
+        address: error.address,
+        port: error.port,
+      }),
+    );
+    server.on('close', () => {
+      this.servers.delete(handle);
+      this.event(handle, 'close');
+    });
+    return { handle };
+  }
+
   executeSync(operation: string, args: any[]): any {
+    if (operation === 'net.server' || operation === 'tls.server')
+      return this.createServer(operation, args);
+    if (operation === 'tls.serverMethod') {
+      const server = this.server(args[0]) as tls.Server;
+      const method = args[1],
+        input = args.slice(2);
+      if (method === 'addContext' && typeof input[1] === 'number')
+        input[1] = this.tls.context(input[1]);
+      const result = Reflect.apply((server as any)[method], server, input);
+      return result === server ? undefined : result;
+    }
     if (operation === 'tls.socket') {
       const socket = this.socket(Number(args[0])) as tls.TLSSocket;
       const method = args[1] as 'exportKeyingMaterial';
-      return Reflect.apply(socket[method], socket, args.slice(2));
+      const input = args.slice(2);
+      if ((method as string) === 'renegotiate') {
+        const id = input[1];
+        input[1] = (error: Error | null) =>
+          void this.callbacks?.async(id, [
+            error ? { message: error.message, name: error.name } : null,
+          ]);
+      }
+      return Reflect.apply(socket[method], socket, input);
     }
     return this.tls.executeSync(operation, args);
   }
@@ -210,15 +284,15 @@ export class NetworkKernel {
         this.websockets.get(Number(args[0]))?.close(args[1], args[2]);
         return undefined;
       case 'tls.connect': {
-        const { customIdentity, socket: socketHandle, ...options } = this.tls.options(args[0]);
+        const { socket: socketHandle, ...options } = this.tls.options(args[0]);
         if (socketHandle !== undefined) {
           options.socket = this.socket(socketHandle);
           this.socketListeners.get(socketHandle)?.();
           this.sockets.delete(socketHandle);
         }
-        // A custom hostname check runs in its owning browser realm. OpenSSL still
+        // Hostname matching runs in the browser realm. OpenSSL still
         // validates the chain; application reads and writes wait for that check.
-        if (customIdentity) options.checkServerIdentity = () => undefined;
+        options.checkServerIdentity = () => undefined;
         const socket = tls.connect(options);
         return { handle: this.attachSocket(socket) };
       }
@@ -229,48 +303,8 @@ export class NetworkKernel {
         return { handle };
       }
       case 'tls.server':
-      case 'net.server': {
-        const secure = operation === 'tls.server';
-        const server = secure
-          ? tls.createServer(this.tls.options(args[0]))
-          : net.createServer(args[0] ?? {});
-        const handle = this.next();
-        this.servers.set(handle, server);
-        server.on('connection', (socket: Socket) => this.trackSocket(socket));
-        server.on(secure ? 'secureConnection' : 'connection', (socket: Socket) => {
-          const socketHandle = this.attachSocket(socket, true);
-          this.event(handle, secure ? 'secureConnection' : 'connection', {
-            handle: socketHandle,
-            ...this.socketInfo(socket),
-          });
-        });
-        if (secure)
-          server.on('tlsClientError', (error: NodeJS.ErrnoException) =>
-            this.event(handle, 'tlsClientError', {
-              name: error.name,
-              message: error.message,
-              code: error.code,
-            }),
-          );
-        server.on('listening', () => this.event(handle, 'listening', server.address()));
-        server.on('error', (error: NodeJS.ErrnoException & { address?: string; port?: number }) =>
-          this.event(handle, 'error', {
-            name: error.name,
-            message: error.message,
-            stack: error.stack,
-            code: error.code,
-            errno: error.errno,
-            syscall: error.syscall,
-            address: error.address,
-            port: error.port,
-          }),
-        );
-        server.on('close', () => {
-          this.servers.delete(handle);
-          this.event(handle, 'close');
-        });
-        return { handle };
-      }
+      case 'net.server':
+        return this.createServer(operation, args);
       case 'net.listen':
         this.server(Number(args[0])).listen(args[1]);
         return undefined;

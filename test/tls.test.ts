@@ -4,7 +4,6 @@ import { once } from 'node:events';
 import tls from 'node:tls';
 import https from 'node:https';
 import { NetworkKernel } from '../src/kernel/network.js';
-import { HttpKernel } from '../src/kernel/http.js';
 import { createNetwork } from '../src/runtime/network.js';
 import { createTls } from '../src/runtime/tls-core.js';
 import { createHttp } from '../src/runtime/http-core.js';
@@ -20,13 +19,11 @@ function realm() {
     listeners.get(handle)?.(event, copy(args));
   const allocate = () => ++sequence;
   const kernel = new NetworkKernel(emit, allocate);
-  const http = new HttpKernel(emit, allocate, kernel);
+
   const commands: string[] = [];
   const call = async (operation: string, ...args: any[]) => {
     commands.push(operation);
-    return copy(
-      await (operation.startsWith('http') ? http : kernel).execute(operation, copy(args)),
-    );
+    return copy(await kernel.execute(operation, copy(args)));
   };
   const sync = (operation: string, ...args: any[]) => {
     commands.push(operation);
@@ -51,12 +48,8 @@ function realm() {
       defaultPort: 443,
       createConnection: secure.connect,
     }),
-    server: createHttp(call, subscribe, {
-      operation: 'https.server',
-      Socket: secure.TLSSocket,
-      options: secure.contextOptions,
-    }),
-    close: () => http.close(),
+    server: createHttp(call, subscribe, secure),
+    close: () => kernel.close(),
   };
 }
 

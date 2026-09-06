@@ -49,6 +49,9 @@ platform.
 | Example          | Assertions                                                                                                          |
 | ---------------- | ------------------------------------------------------------------------------------------------------------------- |
 | `ws`             | Two clients, Unicode and binary broadcasts, compression, ping/pong, close codes, same-port restart, callback counts |
+| `agent`          | HTTP and HTTPS requests queue and reuse one socket with browser-owned scheduling                                    |
+| `http2`          | Four concurrent binary streams over one verified TLS session, flow control, HPACK, and ping                         |
+| `tls-callbacks`  | Asynchronous SNI, synchronous ALPN and PSK, binary keys, accepting socket identity                                  |
 | `archiver`       | Real file → ZIP → independently inflated exact content                                                              |
 | `better-sqlite3` | Native addon, prepared statements, Unicode, binary BLOBs, commit and rollback                                       |
 | `chokidar`       | Native filesystem add/change/unlink events, no events after closing                                                 |
@@ -70,10 +73,12 @@ external service or a database installation.
 
 The examples exercise shared contracts, not adapters for these packages:
 
-- HTTP clients parse response framing locally over the byte-stream transport;
+- HTTP clients and servers parse and frame messages locally over the byte-stream transport;
   HTTP upgrades hand the same socket and unconsumed bytes to the consumer.
 - TLS handshakes and encryption use native Node sockets. The browser retains stream
-  ownership and custom hostname callbacks; negotiated metadata is available locally.
+  ownership, hostname matching, and SNI/ALPN/PSK callbacks; negotiated metadata is available locally.
+- HTTP/2 owns framing, header compression, flow control, and multiplexed streams locally.
+- HTTP/HTTPS Agents own socket reuse and request queues locally.
 - HTTPS shares HTTP framing and lifecycle handling, including secure WebSocket upgrades.
 - Corked socket writes become one kernel write. Headers and the first request
   body chunk are sent together; empty writes make no request.
@@ -97,9 +102,8 @@ not automatically by that command.
 ## Scope
 
 Passing these scenarios is evidence for the exercised behaviors, not a claim that
-every API of each package is supported. `node:http2` remains unsupported. TLS
-callback-based SNI/ALPN selection, PSK callbacks, renegotiation, and runtime server
-context changes are not implemented. The HTTP client currently opens a connection per request;
-Agent pooling and custom Agent behavior are not implemented. Tests use local
-loopback networking; deployment across machines, Windows filesystem operations,
-and sustained-load behavior still need separate validation.
+every API of each package is supported. HTTP/2 file-descriptor response helpers and
+ORIGIN/ALTSVC extension APIs, TLS session-cache and OCSP callbacks, and comprehensive
+HTTP server deadline enforcement remain incomplete. Tests use local loopback networking;
+deployment across machines, Windows filesystem operations, and sustained-load behavior
+still need separate validation.

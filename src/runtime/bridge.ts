@@ -4,6 +4,7 @@ interface KernelBridge {
   owner: object;
   call: KernelCall;
   callSync: (operation: string, ...args: any[]) => any;
+  registerCallback: (callback: Function) => number;
   listeners: Map<number, Set<(event: string, args: any[]) => void>>;
 }
 
@@ -14,11 +15,15 @@ export function installKernel(
   owner: object,
   call: KernelCall,
   callSync: KernelBridge['callSync'],
+  registerCallback: KernelBridge['registerCallback'] = () => {
+    throw new Error('Native callback registry is unavailable');
+  },
 ): void {
   scope[key] = {
     owner,
     call,
     callSync,
+    registerCallback,
     listeners: new Map(),
   } satisfies KernelBridge;
 }
@@ -61,4 +66,11 @@ export function kernelSubscribe(
 export function dispatchKernel(handle: number, event: string, args: any[]): void {
   const bridge = scope[key] as KernelBridge | undefined;
   for (const listener of bridge?.listeners.get(handle) ?? []) listener(event, args);
+}
+
+/** Retain callback identity in the browser; the engine receives only its reference. */
+export function kernelCallback(callback: Function): number {
+  const bridge = scope[key] as KernelBridge | undefined;
+  if (!bridge) throw new Error('Lumiana is not connected');
+  return bridge.registerCallback(callback);
 }

@@ -11,7 +11,6 @@ import processRuntime from '../src/runtime/process.js';
 import { setImmediate, clearImmediate } from '../src/runtime/timers.js';
 import { FileKernel } from '../src/kernel/files.js';
 import { NetworkKernel } from '../src/kernel/network.js';
-import { HttpKernel } from '../src/kernel/http.js';
 import { createFileSystem } from '../src/runtime/filesystem.js';
 import { createNetwork } from '../src/runtime/network.js';
 import { createHttp } from '../src/runtime/http-core.js';
@@ -268,7 +267,7 @@ test('HTTP application callbacks and message objects execute locally', async () 
     listeners.set(handle, set);
     return () => set.delete(listener);
   };
-  const kernel = new HttpKernel((handle, event, ...args) => {
+  const kernel = new NetworkKernel((handle, event, ...args) => {
     for (const listener of listeners.get(handle) ?? []) listener(event, args);
   });
   const runtime = createHttp((operation, ...args) => kernel.execute(operation, args), subscribe);
@@ -289,8 +288,6 @@ test('HTTP application callbacks and message objects execute locally', async () 
     assert.equal(response.headers.get('x-lumiana'), 'local');
     assert.equal(requestPrototype, 'IncomingMessage');
     assert.equal(responsePrototype, 'ServerResponse');
-    await kernel.execute('http.request.resume', [2]);
-    await kernel.execute('http.response.destroy', [3]);
     server.close();
     await once(server, 'close');
   } finally {

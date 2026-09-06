@@ -3,7 +3,6 @@ import { failure } from './protocol.js';
 import { decodeException, decodeValue, encodeException, encodeValue } from './values.js';
 import { FileKernel } from './kernel/files.js';
 import { NetworkKernel } from './kernel/network.js';
-import { HttpKernel } from './kernel/http.js';
 import { SystemKernel } from './kernel/system.js';
 import { ChildProcessKernel } from './kernel/child-process.js';
 import { AddonKernel } from './kernel/addons.js';
@@ -18,6 +17,23 @@ const allocateHandle = () => ++sequence;
 let callbackSequence = 0;
 let context: number | undefined;
 const replies = new Map<number, any>();
+const pendingCallbacks = new Map<
+  number,
+  { resolve: (value: any) => void; reject: (error: Error) => void }
+>();
+function invokeCallbackAsync(id: number, args: any[]): Promise<any> {
+  const request = ++callbackSequence;
+  return new Promise((resolve, reject) => {
+    pendingCallbacks.set(request, { resolve, reject });
+    send({
+      type: 'callback',
+      id: request,
+      callback: id,
+      receiver: encodeValue(undefined),
+      args: encodeValue(args),
+    });
+  });
+}
 
 function pump(until: () => boolean): void {
   while (!until()) {
@@ -28,13 +44,14 @@ function pump(until: () => boolean): void {
   }
 }
 
-function invokeCallback(id: number, receiver: any, args: any[]): any {
+function invokeCallback(id: number, receiver: any, args: any[], synchronous = false): any {
   const request = ++callbackSequence;
   send({
-    type: 'addon-callback',
+    type: 'callback',
     id: request,
     callback: id,
     context,
+    synchronous,
     receiver: encodeValue(receiver),
     args: encodeValue(args),
   });
@@ -48,8 +65,10 @@ const kernelEvent = (handle: number, event: string, ...args: any[]) =>
   send({ type: 'kernel-event', handle, event, value: encodeValue(args) });
 
 const files = new FileKernel(kernelEvent, allocateHandle);
-const network = new NetworkKernel(kernelEvent, allocateHandle);
-const http = new HttpKernel(kernelEvent, allocateHandle, network);
+const network = new NetworkKernel(kernelEvent, allocateHandle, {
+  sync: (id, args) => invokeCallback(id, undefined, args, true),
+  async: invokeCallbackAsync,
+});
 const system = new SystemKernel();
 const children = new ChildProcessKernel(kernelEvent, allocateHandle);
 const addons = new AddonKernel(workerData.root, allocateHandle, invokeCallback);
@@ -61,7 +80,7 @@ const reject = (id: number, error: unknown) =>
   send({ type: 'result', id, ok: false, error: encodeException(error) });
 
 async function close(): Promise<void> {
-  await Promise.all([files.close(), network.close(), http.close(), children.close()]);
+  await Promise.all([files.close(), network.close(), children.close()]);
   addons.close();
   process.exit(0);
 }
@@ -71,8 +90,13 @@ function handle(message: any): void {
     void close();
     return;
   }
-  if (message.type === 'addon-callback-result') {
-    replies.set(message.id, message);
+  if (message.type === 'callback-result') {
+    const pending = pendingCallbacks.get(message.id);
+    if (pending) {
+      pendingCallbacks.delete(message.id);
+      if (message.ok) pending.resolve(decodeValue(message.value));
+      else pending.reject(decodeException(message.error) as Error);
+    } else replies.set(message.id, message);
     return;
   }
   if (message.type !== 'invoke') return;
@@ -91,7 +115,7 @@ function handle(message: any): void {
             ? network
             : operation.startsWith('child.')
               ? children
-              : http;
+              : network;
       void kernel.execute(operation, args).then(
         (value) => result(message.id, value),
         (error) => reject(message.id, error),
@@ -107,7 +131,7 @@ function handle(message: any): void {
           ? files.executeSync(operation, args)
           : operation.startsWith('addon.')
             ? addons.executeSync(operation, args)
-            : operation.startsWith('tls.')
+            : operation.startsWith('tls.') || operation.startsWith('net.')
               ? network.executeSync(operation, args)
               : operation.startsWith('os.') ||
                   operation.startsWith('child.') ||

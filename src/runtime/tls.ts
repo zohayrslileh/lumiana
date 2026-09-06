@@ -1,8 +1,14 @@
-import { kernelCall, kernelSubscribe, kernelCallSync } from './bridge.js';
+import { kernelCall, kernelSubscribe, kernelCallSync, kernelCallback } from './bridge.js';
 import { network } from './socket-runtime.js';
 import { createTls } from './tls-core.js';
 
-export const tlsRuntime = createTls(kernelCall, kernelSubscribe, kernelCallSync, network);
+export const tlsRuntime = createTls(
+  kernelCall,
+  kernelSubscribe,
+  kernelCallSync,
+  network,
+  kernelCallback,
+);
 export const {
   TLSSocket,
   Server,

@@ -1,4 +1,4 @@
-import { kernelCall, kernelSubscribe } from './bridge.js';
+import { kernelCall, kernelSubscribe, kernelCallSync } from './bridge.js';
 import { createNetwork } from './network.js';
 
-export const network = createNetwork(kernelCall, kernelSubscribe);
+export const network = createNetwork(kernelCall, kernelSubscribe, kernelCallSync);
