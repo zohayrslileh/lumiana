@@ -128,6 +128,43 @@ console.log(status.latency);
 The result contains the server PID, uptime, mode, Node version, platform, memory usage, active
 connection count, server time, and latency.
 
+### Execution samples
+
+Run a function once in an isolated Worker:
+
+```ts
+const contents = await lumiana.run(async (filename: string) => {
+  const fs = await import('node:fs/promises');
+  return fs.readFile(filename, 'utf8');
+}, './message.txt');
+```
+
+Create an independent Worker tied to the current connection:
+
+```ts
+const counter = await lumiana.worker((initial: number) => {
+  let value = initial;
+
+  return {
+    increment: () => ++value,
+    current: () => value,
+  };
+}, 0);
+
+console.log(await counter.increment());
+await counter.terminate();
+```
+
+Create or reconnect to one shared Worker that survives browser sessions:
+
+```ts
+const counter = await lumiana.sharedWorker(() => import('./counter.worker'));
+
+console.log(await counter.increment());
+```
+
+A complete shared Worker example is available in [`examples/shared-counter`](./examples/shared-counter).
+
 ### `lumiana.disconnect()`
 
 Closes the connection, stops its dedicated Worker, rejects pending operations, and invalidates
