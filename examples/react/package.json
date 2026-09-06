@@ -12,15 +12,19 @@
   "dependencies": {
     "@grpc/grpc-js": "^1.14.4",
     "@hono/node-server": "^2.1.1",
+    "better-sqlite3": "^13.0.3",
     "hono": "^4.13.7",
     "lumiana": "link:lumiana",
     "react": "^19.2.8",
-    "react-dom": "^19.2.8"
+    "react-dom": "^19.2.8",
+    "socket.io": "^4.8.3",
+    "socket.io-client": "^4.8.3"
   },
   "devDependencies": {
     "@babel/core": "^7.29.7",
     "@rolldown/plugin-babel": "^0.2.3",
     "@types/babel__core": "^7.20.5",
+    "@types/better-sqlite3": "^9.6.0",
     "@types/node": "^24.13.3",
     "@types/react": "^19.2.18",
     "@types/react-dom": "^19.2.7",
