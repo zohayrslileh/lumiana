@@ -5,11 +5,11 @@ import { connect } from 'lumiana/client';
 
 try {
   await connect.credentials({ username: 'lumiana', password: 'lumiana' });
-  const App = await import('./App.tsx');
+  const { App } = await import('./App.tsx');
 
   createRoot(document.getElementById('root')!).render(
     <StrictMode>
-      <App.default />
+      <App />
     </StrictMode>,
   );
 } catch (error) {

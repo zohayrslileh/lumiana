@@ -1,44 +1,88 @@
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import { chromium } from 'playwright';
 
-export default function App() {
-  const [result, setResult] = useState('Not started');
+export function App() {
+  const [imageUrl, setImageUrl] = useState<string | null>(null);
+  const [status, setStatus] = useState('Ready');
 
-  async function run() {
-    setResult('Launching Chromium...');
+  async function capture() {
+    setStatus('Launching Chromium...');
 
     const browser = await chromium.launch({
       headless: true,
     });
 
-    const page = await browser.newPage();
-
-    await page.goto('https://example.com');
-
-    const title = await page.title();
-    const heading = await page.locator('h1').textContent();
-
-    await browser.close();
-
-    setResult(
-      JSON.stringify(
-        {
-          title,
-          heading,
+    try {
+      const page = await browser.newPage({
+        viewport: {
+          width: 1440,
+          height: 900,
         },
-        null,
-        2,
-      ),
-    );
+      });
+
+      setStatus('Opening GitHub...');
+
+      await page.goto('https://github.com', {
+        waitUntil: 'domcontentloaded',
+      });
+
+      setStatus('Taking screenshot...');
+
+      const screenshot = await page.screenshot({
+        type: 'png',
+        fullPage: true,
+      });
+
+      // Convert Playwright Buffer/Uint8Array → browser Blob
+      const bytes = Uint8Array.from(screenshot);
+
+      const blob = new Blob([bytes], {
+        type: 'image/png',
+      });
+
+      const url = URL.createObjectURL(blob);
+
+      setImageUrl((old) => {
+        if (old) {
+          URL.revokeObjectURL(old);
+        }
+
+        return url;
+      });
+
+      setStatus('Done');
+    } finally {
+      await browser.close();
+    }
   }
 
+  useEffect(() => {
+    return () => {
+      if (imageUrl) {
+        URL.revokeObjectURL(imageUrl);
+      }
+    };
+  }, [imageUrl]);
+
   return (
-    <main>
-      <h1>Playwright + React + Lumiana</h1>
+    <main style={{ padding: 24 }}>
+      <h1>Playwright + React</h1>
 
-      <button onClick={run}>Run Playwright</button>
+      <button onClick={capture}>Capture GitHub</button>
 
-      <pre>{result}</pre>
+      <p>{status}</p>
+
+      {imageUrl && (
+        <img
+          src={imageUrl}
+          alt="GitHub screenshot"
+          style={{
+            width: '100%',
+            maxWidth: 1200,
+            border: '1px solid #ccc',
+          }}
+        />
+      )}
     </main>
   );
 }
