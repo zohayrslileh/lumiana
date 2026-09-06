@@ -37,7 +37,7 @@ test(
           const runtime = (name: string) =>
             origin + '/@fs/' + path.resolve('dist', name).replaceAll('\\', '/');
           // Optimized dependencies can request these before the application import graph loads.
-          for (const name of ['browser.js']) {
+          for (const name of ['browser.js', 'runtime/fs.js', 'runtime/filesystem.js']) {
             const response = await request(runtime(name));
             const code = await response.text();
             for (const [, dependency] of code.matchAll(/from ["'](\/node_modules\/[^"']+)["']/g)) {

@@ -9,6 +9,7 @@ export default defineConfig({
     'runtime/child-process': 'src/runtime/child-process.ts',
     'runtime/fs': 'src/runtime/fs.ts',
     'runtime/fs-promises': 'src/runtime/fs-promises.ts',
+    'runtime/filesystem': 'src/runtime/filesystem.ts',
     'runtime/http': 'src/runtime/http.ts',
     'runtime/http2': 'src/runtime/http2.ts',
     'runtime/https': 'src/runtime/https.ts',
@@ -38,6 +39,7 @@ export default defineConfig({
   },
   removeNodeProtocol: false,
   target: 'node20',
-  external: ['vite', 'esbuild', './browser.js'],
+  // Filesystem entry points must share the constructors used to hydrate kernel results.
+  external: ['vite', 'esbuild', './browser.js', './filesystem.js'],
   noExternal: ['@msgpack/msgpack', 'import-meta-resolve', 'process', 'ws'],
 });

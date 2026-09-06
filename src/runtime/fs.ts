@@ -13,6 +13,8 @@ import {
 import { kernelCall, kernelCallSync, kernelSubscribe } from './bridge.js';
 import EventEmitter from 'events';
 
+export { Dirent, Stats, constants, promises };
+
 type Callback = (...args: any[]) => void;
 
 const sync = (name: string, convert?: (value: any, args: any[]) => any) => {

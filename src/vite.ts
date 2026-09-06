@@ -350,7 +350,11 @@ export function lumiana(options: LumianaPluginOptions = {}): Plugin {
       config = resolved;
       // Linked installs may put browser runtime entries outside the Vite root.
       // Extend resolved rules so workspace detection and explicit user paths survive.
-      for (const name of ['browser.js', ...Object.values(runtimeBuiltins)]) {
+      for (const name of [
+        'browser.js',
+        'runtime/filesystem.js',
+        ...Object.values(runtimeBuiltins),
+      ]) {
         const file = normalizePath(path.join(runtimeDir, name));
         if (!config.server.fs.allow.includes(file)) config.server.fs.allow.push(file);
       }
