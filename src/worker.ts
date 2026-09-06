@@ -6,6 +6,7 @@ import { NetworkKernel } from './kernel/network.js';
 import { SystemKernel } from './kernel/system.js';
 import { ChildProcessKernel } from './kernel/child-process.js';
 import { AddonKernel } from './kernel/addons.js';
+import { ModuleKernel } from './kernel/modules.js';
 import { SQLiteKernel } from './kernel/sqlite.js';
 
 if (!parentPort) throw new Error('Lumiana requires a worker thread');
@@ -73,6 +74,7 @@ const network = new NetworkKernel(kernelEvent, allocateHandle, {
 const system = new SystemKernel();
 const children = new ChildProcessKernel(kernelEvent, allocateHandle);
 const addons = new AddonKernel(workerData.root, allocateHandle, invokeCallback);
+const modules = new ModuleKernel(workerData.root);
 const sqlite = new SQLiteKernel(allocateHandle, {
   sync: (id, args) => invokeCallback(id, undefined, args, true),
   async: invokeCallbackAsync,
@@ -142,19 +144,21 @@ function handle(message: any): void {
             ? sqlite.executeSync(operation, args)
             : operation.startsWith('addon.')
               ? addons.executeSync(operation, args)
-              : operation === 'child.spawn'
-                ? children.executeSync(operation, args)
-                : operation.startsWith('tls.') ||
-                    operation.startsWith('net.') ||
-                    operation.startsWith('dns.')
-                  ? network.executeSync(operation, args)
-                  : operation.startsWith('os.') ||
-                      operation.startsWith('child.') ||
-                      operation.startsWith('system.')
-                    ? system.executeSync(operation, args)
-                    : (() => {
-                        throw new TypeError(`Unknown synchronous operation ${operation}`);
-                      })();
+              : operation.startsWith('module.')
+                ? modules.executeSync(operation, args)
+                : operation === 'child.spawn'
+                  ? children.executeSync(operation, args)
+                  : operation.startsWith('tls.') ||
+                      operation.startsWith('net.') ||
+                      operation.startsWith('dns.')
+                    ? network.executeSync(operation, args)
+                    : operation.startsWith('os.') ||
+                        operation.startsWith('child.') ||
+                        operation.startsWith('system.')
+                      ? system.executeSync(operation, args)
+                      : (() => {
+                          throw new TypeError(`Unknown synchronous operation ${operation}`);
+                        })();
       } finally {
         context = previous;
       }

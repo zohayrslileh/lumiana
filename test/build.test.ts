@@ -166,6 +166,45 @@ test('CommonJS transforms preserve the CommonJS module contract', async () => {
   assert.match(transformed.code, /nativeAddon:__lumiana/);
   assert.doesNotMatch(transformed.code, /require\(name\)/);
 });
+
+test('CommonJS require.resolve uses source-anchored native module resolution', async () => {
+  let retained = 0;
+  const transformed = await transformSource(
+    'module.exports = require.resolve(request, { paths: roots });',
+    'node_modules/tool/index.cjs',
+    {
+      origin: 'node_modules/tool/index.cjs',
+      place: async () => ({ available: true }),
+      retainPackage: () => retained++,
+    },
+  );
+  assert.match(transformed!.code, /moduleResolve:__lumiana/);
+  assert.match(
+    transformed!.code,
+    /\(\(specifier,options\)=>__lumiana\d+\(specifier,"node_modules\/tool\/index\.cjs",options\)\)\(request,/,
+  );
+  assert.doesNotMatch(transformed!.code, /require\.resolve/);
+  const runtime = (specifier: string, origin: string, options: any) => ({
+    specifier,
+    origin,
+    options,
+  });
+  const module = { exports: undefined as any };
+  new Function('globalThis', 'module', 'request', 'roots', transformed!.code)(
+    {
+      [Symbol.for('lumiana.runtime')]: { moduleResolve: runtime },
+    },
+    module,
+    'target',
+    ['/modules'],
+  );
+  assert.deepEqual(module.exports, {
+    specifier: 'target',
+    origin: 'node_modules/tool/index.cjs',
+    options: { paths: ['/modules'] },
+  });
+  assert.equal(retained, 1);
+});
 test('scope-aware transforms preserve explicit browser access and local bindings', async () => {
   const source = `import fs from 'node:fs';import {readFile} from 'node:fs/promises';const native=fs.readFileSync('x');const same=fetch('/x');const remote=fetch('https://example.com');window.fetch('/explicit');new WebSocket('/socket');function shadow(fetch,WebSocket,process){fetch();new WebSocket();return process;}const fields={fetch,process};`;
   const transformed = await transformSource(source, 'entry.ts', {

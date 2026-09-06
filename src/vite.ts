@@ -323,6 +323,7 @@ export function lumiana(options: LumianaPluginOptions = {}): Plugin {
                         client: runtimeSpecifier,
                         locateAddon: (request, computed) =>
                           addons.locate(request, id.split('?')[0]!, computed),
+                        retainPackage: () => addons.retain(id.split('?')[0]!),
                         nodeGlobals: !dependencyModule(id) || (await usesNodeEnvironment(id)),
                       });
                     },
@@ -420,6 +421,7 @@ export function lumiana(options: LumianaPluginOptions = {}): Plugin {
                           client: runtimeSpecifier,
                           locateAddon: (request, computed) =>
                             addons.locate(request, args.path, computed),
+                          retainPackage: () => addons.retain(args.path),
                           nodeGlobals:
                             !dependencyModule(args.path) || (await usesNodeEnvironment(args.path)),
                         });
@@ -552,6 +554,7 @@ export function lumiana(options: LumianaPluginOptions = {}): Plugin {
         sourceURL: pathToFileURL(id.split('?')[0]!).href,
         client: runtimeSpecifier,
         locateAddon: (request, computed) => addons.locate(request, id.split('?')[0]!, computed),
+        retainPackage: () => addons.retain(id.split('?')[0]!),
         nodeGlobals: !dependencyModule(id) || (await usesNodeEnvironment(id)),
         place: (specifier, required, kind) =>
           placeModule(

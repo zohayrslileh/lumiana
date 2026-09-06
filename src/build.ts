@@ -171,6 +171,12 @@ export class NativeAddons {
     this.addons.set(boundaryOwner.name, path.join(boundaryOwner.root, 'package.json'));
     return normalized.slice(normalized.lastIndexOf('/node_modules/') + '/node_modules/'.length);
   }
+  retain(importer: string): void {
+    try {
+      const owner = this.owner(importer);
+      this.addons.set(owner.name, path.join(owner.root, 'package.json'));
+    } catch {}
+  }
   async locate(request: string, importer: string, computed = false): Promise<string | undefined> {
     if (!computed) {
       try {
@@ -232,6 +238,8 @@ export interface TransformOptions {
   process?: string;
   timers?: string;
   locateAddon?(request: string, computed?: boolean): Promise<string | undefined>;
+  /** Retain the package whose runtime resources are addressed through require.resolve(). */
+  retainPackage?(): void;
   origin?: string;
   /** Native file URL for the source module represented by this transform. */
   sourceURL?: string;
@@ -365,6 +373,7 @@ export async function transformSource(source: string, id: string, options: Trans
     clearImmediateName = name(),
     filenameName = name(),
     dirnameName = name(),
+    resolveName = name(),
     addonName = name(),
     globalName = name();
   const used = new Set<string>();
@@ -485,6 +494,22 @@ export async function transformSource(source: string, id: string, options: Trans
     },
     CallExpression(p: any) {
       const loader = unwrapExpression(p.node.callee);
+      if (
+        loader.type === 'MemberExpression' &&
+        staticKey(loader) === 'resolve' &&
+        loader.object.type === 'Identifier' &&
+        loader.object.name === 'require' &&
+        !p.scope.getBinding('require')
+      ) {
+        options.retainPackage?.();
+        used.add('moduleResolve');
+        edits.overwrite(
+          loader.start,
+          loader.end,
+          `((specifier,options)=>${resolveName}(specifier,${JSON.stringify(options.origin)},options))`,
+        );
+        return;
+      }
       if (
         options.locateAddon &&
         loader.type === 'CallExpression' &&
@@ -678,6 +703,7 @@ export async function transformSource(source: string, id: string, options: Trans
     Buffer: bufferName,
     moduleDirname: dirnameName,
     moduleFilename: filenameName,
+    moduleResolve: resolveName,
     nativeAddon: addonName,
     nodeGlobal: globalName,
   };

@@ -43,6 +43,10 @@ resuming work. Verify details against source and never store credentials or secr
   value boundary and require an explicit capability contract.
 - Browser-owned runtime objects contain private, connection-owned handles for files, watchers,
   child processes, TCP/Unix sockets, HTTP listeners, WebSockets, and native-addon resources.
+- CommonJS `require.resolve()` stays synchronous and is anchored to the package source represented
+  in the browser bundle. The engine performs only the filesystem/module-resolution decision and
+  returns the resolved path. Packages that address runtime resources this way are retained in the
+  production manifest automatically while their JavaScript stays bundled.
 - Async commands and events use the established binary WebSocket. Inherently synchronous Node
   operations use one synchronous HTTP call. Large synchronous replies are gzip compressed.
 - Native `.node` imports are detected automatically. Package JavaScript stays bundled; only the
@@ -152,7 +156,9 @@ resuming work. Verify details against source and never store credentials or secr
   and the `node:sqlite` case also passed in Vite development and standalone production launched from
   the repository root; the previous 16-case suite passed in both modes. The separate Playwright
   example launches Chromium, reads a page, and closes cleanly in Vite development and production
-  preview. The root suite passed 80 tests; typecheck and both builds passed. Formatting passed after
+  preview. The esbuild example compiles TypeScript in the browser in development and standalone
+  production; its executable package is inferred from `require.resolve()` and retained in the
+  deployment manifest. The root suite passed 82 tests; typecheck and both builds passed. Formatting passed after
   applying Prettier and should be rechecked after subsequent edits. These counts describe the
   current uncommitted worktree and must be updated when the suite changes.
 - The published browser client has no raw `node:buffer` dependency, so importing it cannot produce

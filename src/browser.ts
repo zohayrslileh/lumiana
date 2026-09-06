@@ -518,6 +518,12 @@ export function nativeAddon(specifier: string, sourceOrigin?: string): any {
   const c = connection();
   return materializeAddon(c, addonOperation(c, 'addon.load', specifier, sourceOrigin));
 }
+
+/** @internal Resolve a CommonJS request against its original source module. */
+export function moduleResolve(specifier: string, sourceOrigin?: string, options?: any): string {
+  connection();
+  return kernelCallSync('module.resolve', specifier, sourceOrigin, options);
+}
 /** @internal Hybrid invocation emitted for unbound fetch. */
 export function hybridFetch(input: RequestInfo | URL, init?: RequestInit): Promise<Response> {
   const requestURL = new URL(
@@ -721,6 +727,7 @@ Object.assign((global[Symbol.for('lumiana.runtime')] ??= Object.create(null)), {
   hybridFetch,
   moduleDirname,
   moduleFilename,
+  moduleResolve,
   nativeAddon,
   nodeGlobal,
   process: processRuntime,

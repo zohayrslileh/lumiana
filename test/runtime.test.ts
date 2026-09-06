@@ -11,6 +11,7 @@ import processRuntime from '../src/runtime/process.js';
 import { setImmediate, clearImmediate } from '../src/runtime/timers.js';
 import { FileKernel } from '../src/kernel/files.js';
 import { NetworkKernel } from '../src/kernel/network.js';
+import { ModuleKernel } from '../src/kernel/modules.js';
 import { createFileSystem } from '../src/runtime/filesystem.js';
 import { createNetwork } from '../src/runtime/network.js';
 import { createHttp } from '../src/runtime/http-core.js';
@@ -51,6 +52,22 @@ test('createRequire keeps portable CommonJS constructors local', () => {
   assert.equal(typeof assertModule.equal, 'function');
   assert.equal(require('sqlite'), require('node:sqlite'));
   assert.equal(typeof require('node:sqlite').DatabaseSync, 'function');
+});
+
+test('CommonJS module resolution stays anchored to the original source module', () => {
+  const modules = new ModuleKernel(process.cwd());
+  const owner = {};
+  installKernel(
+    owner,
+    async () => undefined,
+    (operation, ...args) => modules.executeSync(operation, args),
+  );
+  try {
+    const require = createRequire(import.meta.url, 'test/runtime.test.ts');
+    assert.equal(require.resolve('esbuild'), modules.executeSync('module.resolve', ['esbuild']));
+  } finally {
+    removeKernel(owner);
+  }
 });
 
 test('crypto and compression execute locally with binary Node-compatible values', () => {

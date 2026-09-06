@@ -31,6 +31,7 @@ import v8 from './v8.js';
 import vm from './vm.js';
 import workerThreads from './worker-threads.js';
 import * as sqlite from './sqlite.js';
+import { kernelCallSync } from './bridge.js';
 
 const local: Record<string, any> = Object.assign(Object.create(null), {
   assert,
@@ -143,13 +144,9 @@ export function createRequire(
     error.code = 'MODULE_NOT_FOUND';
     throw error;
   }) as NodeRequire;
-  load.resolve = ((specifier: string) => {
+  load.resolve = ((specifier: string, options?: { paths?: string[] }) => {
     if (isBuiltin(specifier)) return specifier;
-    const error = new Error(`Cannot resolve ${JSON.stringify(specifier)} at runtime`) as Error & {
-      code: string;
-    };
-    error.code = 'MODULE_NOT_FOUND';
-    throw error;
+    return kernelCallSync('module.resolve', specifier, sourceOrigin, options);
   }) as NodeRequire['resolve'];
   load.cache = Object.create(null);
   load.extensions = Object.create(null);
