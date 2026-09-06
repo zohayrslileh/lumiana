@@ -22,7 +22,7 @@ export function App() {
 
       setStatus('Opening GitHub...');
 
-      await page.goto('https://github.com', {
+      await page.goto('https://docs.phreshos.com', {
         waitUntil: 'domcontentloaded',
       });
 
