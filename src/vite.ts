@@ -1,7 +1,9 @@
 import type { Plugin, ResolvedConfig, UserConfig } from 'vite';
 import { normalizePath } from 'vite';
 import fs from 'node:fs/promises';
+import { readFileSync, readdirSync } from 'node:fs';
 import path from 'node:path';
+import { createHash } from 'node:crypto';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { isBuiltin, createRequire } from 'node:module';
 import { resolve as resolveImport } from 'import-meta-resolve';
@@ -23,10 +25,27 @@ export interface LumianaPluginOptions {
 }
 const runtimeDir = path.dirname(fileURLToPath(import.meta.url));
 const runtimeRequire = createRequire(import.meta.url);
+// Vite's optimized dependency cache includes optimizer plugin names, but not their
+// implementation. Bind cached output to every Lumiana JavaScript module that can be
+// folded into it, including the browser-side built-in implementations.
+const implementationHash = createHash('sha256');
+const fingerprint = (directory: string) => {
+  for (const entry of readdirSync(directory, { withFileTypes: true }).sort((a, b) =>
+    a.name.localeCompare(b.name),
+  )) {
+    const file = path.join(directory, entry.name);
+    if (entry.isDirectory()) fingerprint(file);
+    else if (entry.name.endsWith('.js'))
+      implementationHash.update(path.relative(runtimeDir, file)).update(readFileSync(file));
+  }
+};
+fingerprint(runtimeDir);
+const optimizerPluginName = `lumiana-dependencies:${implementationHash.digest('hex').slice(0, 12)}`;
 const clientId = '\0lumiana:client';
 const runtimeId = '\0lumiana:runtime';
 const runtimeSpecifier = 'lumiana/runtime';
 const addonPrefix = '\0lumiana:addon:';
+const commonJSBuiltinPrefix = '\0lumiana:commonjs-builtin:';
 const localBuiltins: Record<string, string> = Object.assign(Object.create(null), {
   events: 'events/',
   buffer: 'buffer/',
@@ -38,7 +57,11 @@ const localBuiltins: Record<string, string> = Object.assign(Object.create(null),
 const runtimeBuiltins: Record<string, string> = Object.assign(Object.create(null), {
   path: 'runtime/path.js',
   'assert/strict': 'runtime/assert-strict.js',
+  async_hooks: 'runtime/async-hooks.js',
   child_process: 'runtime/child-process.js',
+  constants: 'runtime/constants.js',
+  dns: 'runtime/dns.js',
+  'dns/promises': 'runtime/dns.js',
   fs: 'runtime/fs.js',
   'fs/promises': 'runtime/fs-promises.js',
   http: 'runtime/http.js',
@@ -49,6 +72,8 @@ const runtimeBuiltins: Record<string, string> = Object.assign(Object.create(null
   os: 'runtime/os.js',
   perf_hooks: 'runtime/perf-hooks.js',
   process: 'runtime/process.js',
+  readline: 'runtime/readline.js',
+  'readline/promises': 'runtime/readline.js',
   sqlite: 'runtime/sqlite.js',
   'stream/promises': 'runtime/stream-promises.js',
   timers: 'runtime/timers.js',
@@ -118,6 +143,11 @@ export function lumiana(options: LumianaPluginOptions = {}): Plugin {
     addonPrefix + JSON.stringify({ specifier, origin: sourceOrigin(importer) });
   const addonTarget = (id: string): { specifier: string; origin?: string } =>
     JSON.parse(id.slice(addonPrefix.length));
+  const commonJSBuiltinId = (file: string) => commonJSBuiltinPrefix + JSON.stringify(file);
+  const commonJSBuiltinTarget = (id: string): string =>
+    JSON.parse(id.slice(commonJSBuiltinPrefix.length));
+  const commonJSBuiltinSource = (file: string) =>
+    `import value from ${JSON.stringify(file)};module.exports=value;`;
   const skip = (id: string) =>
     id.startsWith(runtimeDir + '/') ||
     id.startsWith('\0') ||
@@ -227,7 +257,7 @@ export function lumiana(options: LumianaPluginOptions = {}): Plugin {
               rolldownOptions: {
                 plugins: [
                   {
-                    name: 'lumiana-dependencies',
+                    name: optimizerPluginName,
                     async resolveId(
                       this: any,
                       id: string,
@@ -244,7 +274,10 @@ export function lumiana(options: LumianaPluginOptions = {}): Plugin {
                       }
                       if (id === runtimeSpecifier) return path.join(runtimeDir, 'browser.js');
                       const runtime = runtimeBuiltins[builtinName(id)];
-                      if (runtime) return nodeContract(path.join(runtimeDir, runtime));
+                      if (runtime) {
+                        const file = nodeContract(path.join(runtimeDir, runtime));
+                        return options?.kind === 'require-call' ? commonJSBuiltinId(file) : file;
+                      }
                       const local = localBuiltins[builtinName(id)];
                       if (local) return implementationDependency(runtimeRequire.resolve(local));
                       if (id === 'lumiana/client') return { id, external: true };
@@ -267,6 +300,8 @@ export function lumiana(options: LumianaPluginOptions = {}): Plugin {
                     load(id: string) {
                       // A false browser mapping is an empty module, not a missing file.
                       if (id.startsWith('__vite-browser-external')) return 'module.exports = {};';
+                      if (id.startsWith(commonJSBuiltinPrefix))
+                        return commonJSBuiltinSource(commonJSBuiltinTarget(id));
                       if (id.startsWith(addonPrefix)) {
                         const target = addonTarget(id);
                         return `import {nativeAddon} from ${JSON.stringify(runtimeSpecifier)};export default nativeAddon(${JSON.stringify(target.specifier)},${JSON.stringify(target.origin)});`;
@@ -299,14 +334,19 @@ export function lumiana(options: LumianaPluginOptions = {}): Plugin {
               esbuildOptions: {
                 plugins: [
                   {
-                    name: 'lumiana-dependencies',
+                    name: optimizerPluginName,
                     setup(build: import('esbuild').PluginBuild) {
                       build.onResolve({ filter: /.*/ }, async (args) => {
                         if (args.pluginData?.lumianaProbe) return;
                         if (args.path === runtimeSpecifier)
                           return { path: path.join(runtimeDir, 'browser.js') };
                         const runtime = runtimeBuiltins[builtinName(args.path)];
-                        if (runtime) return { path: nodeContract(path.join(runtimeDir, runtime)) };
+                        if (runtime) {
+                          const file = nodeContract(path.join(runtimeDir, runtime));
+                          return args.kind === 'require-call'
+                            ? { path: file, namespace: 'lumiana-commonjs-builtin' }
+                            : { path: file };
+                        }
                         const local = localBuiltins[builtinName(args.path)];
                         if (local)
                           return { path: implementationDependency(runtimeRequire.resolve(local)) };
@@ -333,6 +373,14 @@ export function lumiana(options: LumianaPluginOptions = {}): Plugin {
                         contents: 'module.exports = {};',
                         loader: 'js',
                       }));
+                      build.onLoad(
+                        { filter: /.*/, namespace: 'lumiana-commonjs-builtin' },
+                        (args) => ({
+                          contents: commonJSBuiltinSource(args.path),
+                          loader: 'js',
+                          resolveDir: path.dirname(args.path),
+                        }),
+                      );
                       build.onResolve({ filter: /\.node$/ }, (args) => {
                         const file = path.isAbsolute(args.path)
                           ? args.path
@@ -442,6 +490,7 @@ export function lumiana(options: LumianaPluginOptions = {}): Plugin {
       });
     },
     async resolveId(id, importer, resolveOptions) {
+      if (id.startsWith(commonJSBuiltinPrefix)) return id;
       if (id.startsWith(addonPrefix)) return id;
       if (id.endsWith('.node')) {
         const resolved = path.isAbsolute(id)
@@ -452,7 +501,10 @@ export function lumiana(options: LumianaPluginOptions = {}): Plugin {
       if (id === 'lumiana/client') return clientId;
       if (id === runtimeSpecifier) return runtimeId;
       const runtime = runtimeBuiltins[builtinName(id)];
-      if (runtime) return nodeContract(path.join(runtimeDir, runtime));
+      if (runtime) {
+        const file = nodeContract(path.join(runtimeDir, runtime));
+        return (resolveOptions as any).kind === 'require-call' ? commonJSBuiltinId(file) : file;
+      }
       const local = localBuiltins[builtinName(id)];
       if (local) return implementationDependency(runtimeRequire.resolve(local));
       if (id === clientId) return id;
@@ -480,6 +532,8 @@ export function lumiana(options: LumianaPluginOptions = {}): Plugin {
       }
     },
     load(id) {
+      if (id.startsWith(commonJSBuiltinPrefix))
+        return commonJSBuiltinSource(commonJSBuiltinTarget(id));
       if (id === clientId) {
         const runtime = JSON.stringify(path.join(runtimeDir, 'browser.js'));
         return `import {configureClient,lumiana,connect} from ${runtime};configureClient(${JSON.stringify(prefix())});export {lumiana,connect};`;

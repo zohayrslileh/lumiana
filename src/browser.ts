@@ -9,6 +9,7 @@ import {
   removeKernel,
 } from './runtime/bridge.js';
 import processRuntime, { initializeProcess } from './runtime/process.js';
+import { initializeConstants } from './runtime/constants.js';
 import { installGlobals } from './runtime/globals.js';
 import { clearOS, initializeOS } from './runtime/os.js';
 import { initializePerformance } from './runtime/perf-hooks.js';
@@ -56,7 +57,7 @@ interface Connection {
   callbackSequence: number;
   addons: {
     values: Map<number, any>;
-    handles: WeakMap<object, number>;
+    handles: Map<any, number>;
   };
 }
 interface Context {
@@ -304,7 +305,7 @@ export const connect = {
         callbackSequence: 0,
         addons: {
           values: new Map(),
-          handles: new WeakMap(),
+          handles: new Map(),
         },
       };
       await new Promise<void>((resolve, reject) => {
@@ -315,6 +316,7 @@ export const connect = {
               state.connection = c;
               state.moduleRoot = initial.root;
               initializeProcess(initial.process);
+              initializeConstants(initial.constants);
               initializeOS(initial.os);
               initializePerformance(initial.performance);
               installKernel(
@@ -392,8 +394,10 @@ export const connect = {
 };
 
 function packAddon(c: Connection, value: any, seen = new Map<any, any>()): any {
-  const object = value && (typeof value === 'object' || typeof value === 'function');
-  const handle = object ? c.addons.handles.get(value) : undefined;
+  const reference =
+    value &&
+    (typeof value === 'object' || typeof value === 'function' || typeof value === 'symbol');
+  const handle = reference ? c.addons.handles.get(value) : undefined;
   if (handle !== undefined) return { __lumianaAddon: handle };
   if (typeof value === 'function') {
     const id = registerCallback(c, value, (receiver, args) => {
@@ -433,6 +437,15 @@ function materializeAddon(c: Connection, descriptor: any): any {
   if (descriptor.kind === 'handle') {
     const value = c.addons.values.get(descriptor.handle);
     if (!value) throw new ReferenceError(`Unknown native-addon handle ${descriptor.handle}`);
+    return value;
+  }
+  if (descriptor.kind === 'symbol') {
+    const previous = c.addons.values.get(descriptor.handle);
+    if (previous) return previous;
+    const value =
+      descriptor.key === undefined ? Symbol(descriptor.description) : Symbol.for(descriptor.key);
+    c.addons.values.set(descriptor.handle, value);
+    c.addons.handles.set(value, descriptor.handle);
     return value;
   }
   if (descriptor.kind !== 'resource') throw new TypeError('Invalid native-addon descriptor');

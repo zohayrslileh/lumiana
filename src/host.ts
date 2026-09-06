@@ -7,6 +7,7 @@ import { createReadStream } from 'node:fs';
 import { gzipSync } from 'node:zlib';
 import os from 'node:os';
 import { constants as performanceConstants } from 'node:perf_hooks';
+import constants from 'node:constants';
 import { WebSocketServer, WebSocket } from 'ws';
 import type { Duplex } from 'node:stream';
 import type { Http2SecureServer } from 'node:http2';
@@ -231,6 +232,7 @@ export function attachHost(server: Server | Http2SecureServer, options: HostOpti
           root: options.root,
           status: status(),
           process: processSnapshot(),
+          constants,
           os: osSnapshot(),
           performance: { constants: performanceConstants },
         });

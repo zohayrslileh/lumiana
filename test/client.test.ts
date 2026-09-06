@@ -151,6 +151,7 @@ test('client contract through real HTTP, binary WebSocket and an isolated native
   const browserNet = await import('../dist/runtime/net.js');
   const browserOS = await import('../dist/runtime/os.js');
   const browserChildProcess = await import('../dist/runtime/child-process.js');
+  const browserDNS = await import('../dist/runtime/dns.js');
   const browserUtil = await import('../dist/runtime/util.js');
   const creds = { username: 'test', password: 'secret', url };
   const compile = async (source: string, origin = 'reader.js') => {
@@ -307,10 +308,28 @@ test('client contract through real HTTP, binary WebSocket and an isolated native
     ]);
     assert.equal(execution.child.constructor, browserChildProcess.ChildProcess);
     assert.deepEqual(await execution, { stdout: 'promisified', stderr: 'stderr' });
+    const piped = browserChildProcess.spawn(
+      process.execPath,
+      [
+        '-e',
+        "const fs=require('fs');const input=fs.createReadStream(null,{fd:3});const output=fs.createWriteStream(null,{fd:4});input.on('data',chunk=>output.write(chunk));input.on('end',()=>output.end())",
+      ],
+      { stdio: ['ignore', 'ignore', 'ignore', 'pipe', 'pipe'] },
+    );
+    const pipeOutput: Buffer[] = [];
+    piped.stdio[4].on('data', (chunk: Buffer) => pipeOutput.push(chunk));
+    const pipeClosed = once(piped.stdio[4], 'close');
+    piped.stdio[3].end(Buffer.from([3, 2, 1]));
+    await once(piped.stdio[4], 'end');
+    await once(piped, 'close');
+    await pipeClosed;
+    assert.deepEqual(Buffer.concat(pipeOutput), Buffer.from([3, 2, 1]));
+    const address = await browserDNS.promises.lookup('localhost');
+    assert.ok(address.family === 4 || address.family === 6);
     assert.equal(
       XMLHttpRequest.requests,
-      beforeChild,
-      'child process lifecycle and binary streams use the established WebSocket',
+      beforeChild + 3,
+      'each spawn crosses synchronously once; lifecycle and binary streams use the WebSocket',
     );
     const beforeNetworkKernel = XMLHttpRequest.requests;
     const kernelServer = browserNet.createServer((socket: any) =>

@@ -14,6 +14,7 @@ type Descriptor =
       prototype?: Descriptor;
     }
   | { kind: 'handle'; handle: number }
+  | { kind: 'symbol'; handle: number; key?: string; description?: string }
   | { kind: 'promise'; handle: number };
 
 interface PropertyDescriptorRecord {
@@ -29,7 +30,7 @@ interface PropertyDescriptorRecord {
 /** Native-addon state is an explicit host resource; package JavaScript never enters this kernel. */
 export class AddonKernel {
   private values = new Map<number, any>();
-  private handles = new WeakMap<object, number>();
+  private handles = new Map<any, number>();
   private promises = new Map<number, Promise<any>>();
   private callbacks = new Map<number, Function>();
 
@@ -63,6 +64,20 @@ export class AddonKernel {
       const handle = this.allocate();
       this.promises.set(handle, value);
       return { kind: 'promise', handle };
+    }
+    if (typeof value === 'symbol') {
+      let handle = this.handles.get(value);
+      if (handle === undefined) {
+        handle = this.allocate();
+        this.handles.set(value, handle);
+        this.values.set(handle, value);
+      }
+      const key = Symbol.keyFor(value);
+      return {
+        kind: 'symbol',
+        handle,
+        ...(key === undefined ? { description: value.description } : { key }),
+      };
     }
     if ((typeof value !== 'object' || value === null) && typeof value !== 'function')
       throw new TypeError(`Unsupported native-addon value ${typeof value}`);

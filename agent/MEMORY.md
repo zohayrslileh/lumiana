@@ -35,8 +35,9 @@ resuming work. Verify details against source and never store credentials or secr
 
 ## Architecture
 
-- Package JavaScript, module state, classes, callbacks, streams, and events stay in the browser.
-  The Worker never loads ordinary package JavaScript as an execution fallback.
+- Statically identifiable package JavaScript, module state, classes, callbacks, streams, and events
+  stay in the browser. A runtime-computed `require()` has no build-time module identity, so it uses
+  the native reference store; this is distinct from moving a statically known dependency graph.
 - Primitive values, data-only records, arrays, dates, regular expressions, and binary views copy
   through MessagePack. Cycles are retained. Functions and behavioral objects are rejected by the
   value boundary and require an explicit capability contract.
@@ -53,11 +54,14 @@ resuming work. Verify details against source and never store credentials or secr
   the installed package at build time. This is based on call shape and matching binary evidence,
   never a loader or consumer package name. The result uses the same native-addon capability as a
   direct `.node` import.
-- If an addon loader computes its final `.node` path and passes it to dynamic `require`, Lumiana
-  keeps the path computation local and transforms the load only when the module has statically
-  verified installed-addon evidence. Discovery prefers an exact basename, then a single binary for
-  the build platform and architecture, and rejects ambiguity. Dynamic JavaScript module loading is
-  not redirected.
+- If a loader computes its request and passes it to dynamic `require`, Lumiana keeps the path
+  computation local and represents the loaded native value through the same reference store.
+  Statically identified JavaScript dependencies still stay in the browser bundle. Addon discovery
+  prefers an exact basename, then a single binary for the build platform and architecture, and
+  rejects ambiguity.
+- A statically named unavailable `require()` throws at that call, and a statically named
+  unavailable `import()` returns a rejected Promise at that expression. This preserves the
+  package's own optional-dependency fallback without leaving an unresolved import for Vite.
 - Dependency modules that explicitly consume the Node execution contract resolve their own
   conditional dependencies with Node conditions. A required export missing from a browser entry
   may select the package's Node entry, which is still bundled for the browser. This uses source and
@@ -76,8 +80,8 @@ resuming work. Verify details against source and never store credentials or secr
 - Node provenance propagates across every resolved dependency edge of a selected local Node
   contract, including relative files and helper packages. This keeps its complete implementation
   graph in one execution domain without affecting ordinary browser dependency graphs.
-- Unknown Node builtin domains fail clearly at build time. They do not make the importing package
-  Worker-owned.
+- Node builtins with browser runtime contracts use those local contracts. Other builtins use the
+  generic native reference store while the importing package remains browser-owned.
 - Stable `process` and `node:os` information is copied once during connection. `process.env` is a
   local null-prototype object; property reads and `JSON.stringify(process.env)` make no calls.
 - Unqualified `fetch` and `WebSocket` use hybrid routing. Same-origin traffic stays in the browser;
@@ -102,11 +106,14 @@ resuming work. Verify details against source and never store credentials or secr
   and secure HTTP/1 fallback.
 - `node:tls`: client and server sockets, TCP upgrades, certificate validation, local hostname
   matching, secure contexts, ticket keys, SNI, ALPN, PSK, and TLS 1.2 renegotiation.
-- `node:child_process`: local lifecycle objects, streams, callbacks, Promise customization, IPC
-  commands, and synchronous variants.
-- Local or snapshot-backed `assert`, `buffer`, `crypto`, `events`, `module`, `os`, `path`,
-  `perf_hooks`, `process`, `querystring`, `stream`, `stream/promises`, `string_decoder`, `timers`,
-  `tty`, `url`, `util`, `v8` serialization, `vm` basics, and `zlib`.
+- `node:child_process`: local lifecycle objects, standard and arbitrary piped file descriptors,
+  complete stream lifecycle events, callbacks, Promise customization, IPC commands, and
+  synchronous variants.
+- Local or snapshot-backed `assert`, `async_hooks` basics, `buffer`, `constants`, `crypto`, `events`,
+  `module`, `os`, `path`, `perf_hooks`, `process`, `querystring`, `readline`, `stream`,
+  `stream/promises`, `string_decoder`, `timers`, `tty`, `url`, `util`, `v8` serialization, `vm`
+  basics, and `zlib`.
+- `node:dns`: callback and Promise lookups/resolvers, plus synchronous resolver configuration.
 - Hybrid Fetch and WebSocket with binary transport and abort support.
 - `node:sqlite`: browser-owned API objects, iterators, tagged-statement caching, and callbacks;
   engine-owned native database, statement, iterator, and session handles.
@@ -141,14 +148,18 @@ resuming work. Verify details against source and never store credentials or secr
 - HTTP/2 interoperates in both directions with native Node peers. Its protocol machinery remains
   local, coalesces outgoing frames, rejects invalid settings, handles repeated identical ping
   payloads, and closes requests queued before connection without leaving them pending.
-- The compatibility suite now contains 17 browser examples. All 17 passed in Vite production
-  preview, and the `node:sqlite` case also passed in Vite development and standalone production
-  launched from the repository root; the previous 16-case suite passed in both modes. The root suite
-  passed 77 tests; typecheck, formatting, root build, example build, and standalone native
-  dependency installation passed. These counts describe the current uncommitted worktree and must
-  be updated when the suite changes.
+- The compatibility suite contains 17 browser examples. All 17 passed in Vite production preview,
+  and the `node:sqlite` case also passed in Vite development and standalone production launched from
+  the repository root; the previous 16-case suite passed in both modes. The separate Playwright
+  example launches Chromium, reads a page, and closes cleanly in Vite development and production
+  preview. The root suite passed 80 tests; typecheck and both builds passed. Formatting passed after
+  applying Prettier and should be rechecked after subsequent edits. These counts describe the
+  current uncommitted worktree and must be updated when the suite changes.
 - The published browser client has no raw `node:buffer` dependency, so importing it cannot produce
   Vite's browser-external stub even before the Lumiana plugin participates in resolution.
+- Optimized dependency output is keyed by a content fingerprint of Lumiana's installed Vite
+  transformer. Rebuilding or updating a linked Lumiana checkout invalidates stale transformed
+  dependencies without requiring consumers to delete `node_modules/.vite` or pass `--force`.
 
 ## Remaining runtime domains
 
@@ -162,9 +173,9 @@ resuming work. Verify details against source and never store credentials or secr
   placement continues to bundle every package that can consume browser runtime contracts.
 - Export the plugin from the package root so `import { lumiana } from 'lumiana'` is supported while
   `lumiana/client` remains the browser entry.
-- DNS, UDP, full worker-thread semantics, async context, and process lifecycle.
-- Complete VM context semantics, V8 introspection, advanced child-process stdio and error metadata,
-  and broader real native-addon fixtures.
+- UDP, full worker-thread semantics, complete async-context propagation, and process lifecycle.
+- Complete VM context semantics, V8 introspection, broader child-process parity, and broader real
+  native-addon fixtures.
 - Cross-machine deployment behavior and Windows filesystem/network behavior need their own
   validation environments.
 - A general compiler transaction model that can lift synchronous-looking source into asynchronous

@@ -548,15 +548,35 @@ export async function transformSource(source: string, id: string, options: Trans
       requiredExports,
       n.type === 'CallExpression' ? 'require' : 'import',
     );
-    if (placement.available === false && isBuiltin(specifier) && n.type !== 'CallExpression')
+    if (placement.available === false && isBuiltin(specifier) && n.type === 'CallExpression') {
+      // System-owned built-ins retain their native implementation. The browser
+      // receives a stable reference graph; calls and property access cross only
+      // when the native value's contract requires them.
+      used.add('nativeAddon');
+      edits.overwrite(
+        n.start,
+        n.end,
+        `${addonName}(${JSON.stringify(specifier)},${JSON.stringify(options.origin)})`,
+      );
+      moduleSourceChanged = true;
+    } else if (placement.available === false && isBuiltin(specifier))
       throw new Error(`Lumiana has no local runtime contract for ${JSON.stringify(specifier)}`);
-    if (placement.available === false && n.type === 'CallExpression') {
+    else if (placement.available === false && n.type === 'CallExpression') {
       // Preserve optional require semantics: failure happens at the call, where
       // the package's own try/catch can choose its normal fallback.
       edits.overwrite(
         n.start,
         n.end,
         `(()=>{const error=new Error(${JSON.stringify('Cannot find module ' + specifier)});error.code='MODULE_NOT_FOUND';throw error})()`,
+      );
+      moduleSourceChanged = true;
+    } else if (placement.available === false && n.type === 'ImportExpression') {
+      // A dynamic import is a runtime Promise contract. Reject it at the original
+      // expression so the importing module can handle an unavailable optional package.
+      edits.overwrite(
+        n.start,
+        n.end,
+        `Promise.reject(Object.assign(new Error(${JSON.stringify(`Cannot find package '${specifier}'`)}),{code:'ERR_MODULE_NOT_FOUND'}))`,
       );
       moduleSourceChanged = true;
     } else if (placement.replacement) {
@@ -599,19 +619,19 @@ export async function transformSource(source: string, id: string, options: Trans
       }
     return;
   };
-  if (options.locateAddon)
-    for (const p of dynamicRequires) {
-      const hint = addonHint(p.node.arguments[0], p.scope);
-      // A computed filename can be selected by control flow, not just by its
-      // initializer. Discover addon ownership now; select its actual path at runtime.
-      if (!(await options.locateAddon(hint ?? '', true))) continue;
-      used.add('nativeAddon');
-      edits.overwrite(
-        p.node.callee.start,
-        p.node.callee.end,
-        `(specifier=>typeof specifier==='string'&&specifier.endsWith('.node')?${addonName}(specifier,${JSON.stringify(options.origin)}):require(specifier))`,
-      );
-    }
+  for (const p of dynamicRequires) {
+    const hint = addonHint(p.node.arguments[0], p.scope);
+    // Static JavaScript dependencies remain in the bundle. A runtime-selected
+    // module has no build-time identity, so its value belongs to the native
+    // reference domain regardless of its filename or package.
+    if (options.locateAddon && hint?.endsWith('.node')) await options.locateAddon(hint, true);
+    used.add('nativeAddon');
+    edits.overwrite(
+      p.node.callee.start,
+      p.node.callee.end,
+      `(specifier=>${addonName}(specifier,${JSON.stringify(options.origin)}))`,
+    );
+  }
 
   for (const p of globals) {
     const n = p.node;

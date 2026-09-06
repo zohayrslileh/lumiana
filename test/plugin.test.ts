@@ -2,8 +2,36 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs/promises';
 import path from 'node:path';
+import { createHash } from 'node:crypto';
+import { readdirSync, readFileSync } from 'node:fs';
 import { build } from 'vite';
 import { lumiana } from '../dist/vite.js';
+
+test('dependency cache identity follows the installed Lumiana transformer', async () => {
+  const root = path.resolve('dist');
+  const hash = createHash('sha256');
+  const fingerprint = (directory: string) => {
+    for (const entry of readdirSync(directory, { withFileTypes: true }).sort((a, b) =>
+      a.name.localeCompare(b.name),
+    )) {
+      const file = path.join(directory, entry.name);
+      if (entry.isDirectory()) fingerprint(file);
+      else if (entry.name.endsWith('.js'))
+        hash.update(path.relative(root, file)).update(readFileSync(file));
+    }
+  };
+  fingerprint(root);
+  const expected = `lumiana-dependencies:${hash.digest('hex').slice(0, 12)}`;
+  const configure = async (root: string) =>
+    (await (lumiana().config as any).call({}, { root }, { command: 'serve', mode: 'development' }))
+      .optimizeDeps;
+
+  const vite6 = await configure(process.cwd());
+  assert.equal(vite6.esbuildOptions.plugins[0].name, expected);
+
+  const vite8 = await configure(path.resolve('examples/react'));
+  assert.equal(vite8.rolldownOptions.plugins[0].name, expected);
+});
 
 test('the published browser client has no raw Node builtin dependency', async () => {
   const root = await fs.mkdtemp(path.join(process.cwd(), 'node_modules/.lumiana-client-build-'));

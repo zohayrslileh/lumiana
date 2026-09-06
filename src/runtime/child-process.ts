@@ -4,6 +4,8 @@ import { Buffer } from 'buffer';
 import { kernelCall, kernelCallSync, kernelSubscribe } from './bridge.js';
 import { promisify } from './util.js';
 
+const error = (record: any) => Object.assign(new Error(record.message), record);
+
 class ChildReadable extends stream.Readable {
   _read() {}
   receive(data: Uint8Array) {
@@ -11,6 +13,12 @@ class ChildReadable extends stream.Readable {
   }
   finish() {
     this.push(null);
+  }
+  fail(error: Error) {
+    this.destroy(error);
+  }
+  close() {
+    this.destroy();
   }
 }
 
@@ -26,6 +34,42 @@ class ChildWritable extends stream.Writable {
   _final(done: (error?: Error | null) => void) {
     this.owner.operation('child.stdin.end').then(() => done(), done);
   }
+  fail(error: Error) {
+    this.destroy(error);
+  }
+  close() {
+    this.destroy();
+  }
+}
+
+class ChildPipe extends stream.Duplex {
+  constructor(
+    private owner: ChildProcess,
+    private index: number,
+  ) {
+    super();
+  }
+  _read() {}
+  _write(chunk: any, _encoding: BufferEncoding, done: (error?: Error | null) => void) {
+    this.owner
+      .operation('child.stdio.write', this.index, Buffer.from(chunk))
+      .then(() => done(), done);
+  }
+  _final(done: (error?: Error | null) => void) {
+    this.owner.operation('child.stdio.end', this.index).then(() => done(), done);
+  }
+  receive(data: Uint8Array) {
+    this.push(Buffer.from(data));
+  }
+  finish() {
+    this.push(null);
+  }
+  fail(error: Error) {
+    this.destroy(error);
+  }
+  close() {
+    this.destroy();
+  }
 }
 
 export class ChildProcess extends EventEmitter {
@@ -34,40 +78,69 @@ export class ChildProcess extends EventEmitter {
   killed = false;
   exitCode: number | null = null;
   signalCode: string | null = null;
-  readonly stdin = new ChildWritable(this);
-  readonly stdout = new ChildReadable();
-  readonly stderr = new ChildReadable();
-  readonly stdio = [this.stdin, this.stdout, this.stderr] as const;
+  readonly stdin: ChildWritable | null;
+  readonly stdout: ChildReadable | null;
+  readonly stderr: ChildReadable | null;
+  readonly stdio: any[];
+  private pipes = new Map<number, ChildPipe>();
   private handle?: number;
   private unsubscribe?: () => void;
   private ready: Promise<number>;
 
   constructor(command: string, args: readonly string[] = [], options?: any) {
     super();
-    this.ready = kernelCall('child.spawn', command, [...args], options).then((result) => {
-      this.handle = result.handle;
-      this.pid = result.pid;
-      this.connected = result.connected;
-      this.unsubscribe = kernelSubscribe(result.handle, (event, values) =>
-        this.receive(event, values),
-      );
-      void kernelCall('child.attach', result.handle);
-      return result.handle;
-    });
-    void this.ready.catch((error) => this.emit('error', error));
+    const configured = options?.stdio;
+    const piped = (index: number) =>
+      configured === undefined ||
+      configured === 'pipe' ||
+      (Array.isArray(configured) && configured[index] === 'pipe');
+    this.stdin = piped(0) ? new ChildWritable(this) : null;
+    this.stdout = piped(1) ? new ChildReadable() : null;
+    this.stderr = piped(2) ? new ChildReadable() : null;
+    this.stdio = [this.stdin, this.stdout, this.stderr];
+    if (Array.isArray(configured))
+      for (let index = 3; index < configured.length; index++)
+        if (configured[index] === 'pipe') {
+          const pipe = new ChildPipe(this, index);
+          this.pipes.set(index, pipe);
+          this.stdio[index] = pipe;
+        } else this.stdio[index] = null;
+    const result = kernelCallSync('child.spawn', command, [...args], options);
+    this.handle = result.handle;
+    this.pid = result.pid;
+    this.connected = result.connected;
+    this.unsubscribe = kernelSubscribe(result.handle, (event, values) =>
+      this.receive(event, values),
+    );
+    this.ready = Promise.resolve(result.handle);
+    void kernelCall('child.attach', result.handle);
   }
 
   private receive(event: string, args: any[]) {
-    if (event === 'stdout.data') return this.stdout.receive(args[0]);
-    if (event === 'stdout.end') return this.stdout.finish();
-    if (event === 'stderr.data') return this.stderr.receive(args[0]);
-    if (event === 'stderr.end') return this.stderr.finish();
+    if (event === 'stdout.data') return this.stdout?.receive(args[0]);
+    if (event === 'stdout.end') return this.stdout?.finish();
+    if (event === 'stdout.error') return this.stdout?.fail(error(args[0]));
+    if (event === 'stdout.close') return this.stdout?.close();
+    if (event === 'stderr.data') return this.stderr?.receive(args[0]);
+    if (event === 'stderr.end') return this.stderr?.finish();
+    if (event === 'stderr.error') return this.stderr?.fail(error(args[0]));
+    if (event === 'stderr.close') return this.stderr?.close();
+    if (event === 'stdin.error') return this.stdin?.fail(error(args[0]));
+    if (event === 'stdin.close') return this.stdin?.close();
+    const pipe = /^stdio\.(\d+)\.(data|end|error|close)$/.exec(event);
+    if (pipe) {
+      const stream = this.pipes.get(Number(pipe[1]));
+      if (pipe[2] === 'data') return stream?.receive(args[0]);
+      if (pipe[2] === 'end') return stream?.finish();
+      if (pipe[2] === 'error') return stream?.fail(error(args[0]));
+      return stream?.close();
+    }
     if (event === 'exit') {
       this.exitCode = args[0];
       this.signalCode = args[1];
     }
     if (event === 'disconnect') this.connected = false;
-    this.emit(event, ...args);
+    this.emit(event, ...(event === 'error' ? [error(args[0])] : args));
     if (event === 'close') this.unsubscribe?.();
   }
 
@@ -123,8 +196,8 @@ export function execFile(
   const stdout: Buffer[] = [],
     stderr: Buffer[] = [];
   let complete = false;
-  child.stdout.on('data', (chunk) => stdout.push(chunk));
-  child.stderr.on('data', (chunk) => stderr.push(chunk));
+  child.stdout?.on('data', (chunk) => stdout.push(chunk));
+  child.stderr?.on('data', (chunk) => stderr.push(chunk));
   const finish = (error: Error | null, code?: number | null) => {
     if (complete) return;
     complete = true;

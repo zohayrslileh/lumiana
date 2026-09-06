@@ -24,6 +24,31 @@ test('unavailable CommonJS dependencies fail at the require call so package fall
   assert.throws(() => new Function(required!.code)(), { code: 'MODULE_NOT_FOUND' });
 });
 
+test('system-owned CommonJS built-ins use the native reference contract', async () => {
+  const transformed = await transformSource(
+    "module.exports=require('node:inspector');",
+    'tool.cjs',
+    {
+      origin: 'node_modules/tool/tool.cjs',
+      place: async () => ({ available: false }),
+    },
+  );
+  assert.match(transformed!.code, /nativeAddon:__lumiana/);
+  assert.match(transformed!.code, /\("node:inspector","node_modules\/tool\/tool\.cjs"\)/);
+  assert.doesNotMatch(transformed!.code, /Cannot find module/);
+});
+
+test('unavailable dynamic imports reject where package fallback logic can handle them', async () => {
+  const source = `module.exports=(async()=>{try{await import('optional-auth');return 'loaded'}catch(error){return error.code}})();`;
+  const transformed = await transformSource(source, 'optional.cjs', {
+    place: async () => ({ available: false }),
+  });
+  assert.doesNotMatch(transformed!.code, /import\(['"]optional-auth/);
+  const module = { exports: undefined as any };
+  new Function('module', transformed!.code)(module);
+  assert.equal(await module.exports, 'ERR_MODULE_NOT_FOUND');
+});
+
 test('both Node builtin specifier forms establish Node execution provenance', () => {
   for (const source of [
     "const fs = require('fs');",
@@ -138,7 +163,8 @@ test('CommonJS transforms preserve the CommonJS module contract', async () => {
   assert.match(transformed.code, /Symbol\.for\("lumiana\.runtime"\)/);
   assert.match(transformed.code, /process:__lumiana/);
   assert.match(transformed.code, /setImmediate:__lumiana/);
-  assert.match(transformed.code, /require\(name\)/);
+  assert.match(transformed.code, /nativeAddon:__lumiana/);
+  assert.doesNotMatch(transformed.code, /require\(name\)/);
 });
 test('scope-aware transforms preserve explicit browser access and local bindings', async () => {
   const source = `import fs from 'node:fs';import {readFile} from 'node:fs/promises';const native=fs.readFileSync('x');const same=fetch('/x');const remote=fetch('https://example.com');window.fetch('/explicit');new WebSocket('/socket');function shadow(fetch,WebSocket,process){fetch();new WebSocket();return process;}const fields={fetch,process};`;
@@ -458,7 +484,7 @@ test('packages remain local and native-addon ownership is tracked independently'
     };
     for (const [filename, expected] of [
       ['/prebuilt/selected.node', 'native:/prebuilt/selected.node'],
-      ['ordinary-package', 'local:ordinary-package'],
+      ['ordinary-package', 'native:ordinary-package'],
     ]) {
       const module = { exports: undefined };
       new Function('globalThis', 'module', 'select', 'require', selected!.code)(
@@ -511,7 +537,9 @@ test('packages remain local and native-addon ownership is tracked independently'
         origin: 'dynamic.cjs',
       },
     );
-    assert.equal(dynamicModule, null, 'dynamic loading is not redirected to the Worker');
+    assert.match(dynamicModule!.code, /nativeAddon:__lumiana/);
+    assert.match(dynamicModule!.code, /specifier,"dynamic\.cjs"/);
+    assert.doesNotMatch(dynamicModule!.code, /require\(name\)/);
   } finally {
     await fs.rm(temp, { recursive: true, force: true });
   }

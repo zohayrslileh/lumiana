@@ -1,10 +1,14 @@
 import assert from 'assert';
+import asyncHooks from './async-hooks.js';
 import * as buffer from 'buffer';
 import crypto from './crypto.js';
+import constants from './constants.js';
+import dns, { promises as dnsPromises } from './dns.js';
 import EventEmitter from 'events';
 import path from './path.js';
 import process from './process.js';
 import querystring from 'querystring-es3';
+import readline, { promises as readlinePromises } from './readline.js';
 import stream from 'stream-browserify';
 import stringDecoder from 'string_decoder';
 import url from './url.js';
@@ -31,9 +35,13 @@ import * as sqlite from './sqlite.js';
 const local: Record<string, any> = Object.assign(Object.create(null), {
   assert,
   'assert/strict': assert.strict,
+  async_hooks: asyncHooks,
   buffer,
   child_process: childProcess,
+  constants,
   crypto,
+  dns,
+  'dns/promises': dnsPromises,
   events: EventEmitter,
   fs,
   'fs/promises': fsPromises,
@@ -46,6 +54,8 @@ const local: Record<string, any> = Object.assign(Object.create(null), {
   perf_hooks: perfHooks,
   process,
   querystring,
+  readline,
+  'readline/promises': readlinePromises,
   stream,
   'stream/promises': streamPromises,
   string_decoder: stringDecoder,
@@ -74,6 +84,7 @@ const names = new Set([
   'dgram',
   'diagnostics_channel',
   'dns',
+  'dns/promises',
   'events',
   'fs',
   'fs/promises',
@@ -88,6 +99,7 @@ const names = new Set([
   'process',
   'querystring',
   'readline',
+  'readline/promises',
   'stream',
   'stream/promises',
   'string_decoder',

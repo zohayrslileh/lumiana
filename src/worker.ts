@@ -118,6 +118,7 @@ function handle(message: any): void {
             ? addons
             : operation.startsWith('net.') ||
                 operation.startsWith('tls.') ||
+                operation.startsWith('dns.') ||
                 operation.startsWith('fetch.') ||
                 operation.startsWith('websocket.')
               ? network
@@ -141,15 +142,19 @@ function handle(message: any): void {
             ? sqlite.executeSync(operation, args)
             : operation.startsWith('addon.')
               ? addons.executeSync(operation, args)
-              : operation.startsWith('tls.') || operation.startsWith('net.')
-                ? network.executeSync(operation, args)
-                : operation.startsWith('os.') ||
-                    operation.startsWith('child.') ||
-                    operation.startsWith('system.')
-                  ? system.executeSync(operation, args)
-                  : (() => {
-                      throw new TypeError(`Unknown synchronous operation ${operation}`);
-                    })();
+              : operation === 'child.spawn'
+                ? children.executeSync(operation, args)
+                : operation.startsWith('tls.') ||
+                    operation.startsWith('net.') ||
+                    operation.startsWith('dns.')
+                  ? network.executeSync(operation, args)
+                  : operation.startsWith('os.') ||
+                      operation.startsWith('child.') ||
+                      operation.startsWith('system.')
+                    ? system.executeSync(operation, args)
+                    : (() => {
+                        throw new TypeError(`Unknown synchronous operation ${operation}`);
+                      })();
       } finally {
         context = previous;
       }

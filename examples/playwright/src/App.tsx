@@ -1,11 +1,11 @@
-import { useState } from "react";
-import { chromium } from "playwright";
+import { useState } from 'react';
+import { chromium } from 'playwright';
 
-export function App() {
-  const [result, setResult] = useState("Not started");
+export default function App() {
+  const [result, setResult] = useState('Not started');
 
   async function run() {
-    setResult("Launching Chromium...");
+    setResult('Launching Chromium...');
 
     const browser = await chromium.launch({
       headless: true,
@@ -13,10 +13,10 @@ export function App() {
 
     const page = await browser.newPage();
 
-    await page.goto("https://example.com");
+    await page.goto('https://example.com');
 
     const title = await page.title();
-    const heading = await page.locator("h1").textContent();
+    const heading = await page.locator('h1').textContent();
 
     await browser.close();
 
@@ -27,8 +27,8 @@ export function App() {
           heading,
         },
         null,
-        2
-      )
+        2,
+      ),
     );
   }
 
@@ -36,9 +36,7 @@ export function App() {
     <main>
       <h1>Playwright + React + Lumiana</h1>
 
-      <button onClick={run}>
-        Run Playwright
-      </button>
+      <button onClick={run}>Run Playwright</button>
 
       <pre>{result}</pre>
     </main>
