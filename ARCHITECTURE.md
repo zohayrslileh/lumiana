@@ -12,7 +12,6 @@ addon. A package is a consumer of these contracts and never determines their sha
 | Capabilities  | Identify connection-owned files, processes, listeners, sockets, and native-addon resources with opaque numeric handles.          | `runtime/*`, `kernel/*`              |
 | Transport     | Send asynchronous commands and events over MessagePack WebSocket; send inherently synchronous commands through synchronous HTTP. | `browser.ts`, `host.ts`, `worker.ts` |
 | Connection    | Authenticate once, create one Worker, and bind the browser session and Worker lifetime together.                                 | `browser.ts`, `host.ts`              |
-| Isolated task | Execute one complete function in a fresh Worker and stream generator output with bounded flow control.                           | `build.ts`, `kernel/run.ts`          |
 
 ## Ownership
 
@@ -42,31 +41,17 @@ the serializer from silently stripping prototypes, methods, or descriptors.
 Errors cross as copied error information and are reconstructed in the receiving context. Worker
 logs and fatal errors are projected into the browser.
 
-## Isolated tasks
-
-`lumiana.run()` defines a separate execution domain from the browser-owned package graph. The Vite
-transform captures an inline task before browser builtin rewriting, compiles its TypeScript and
-bundles its relative imports. Bare package imports remain engine dependencies and are recorded in
-the production manifest. The task cannot capture browser lexical bindings; runtime data enters
-through copied arguments.
-
-Each invocation creates a fresh child Worker owned by the authenticated connection Worker. Its
-task context exposes Node process, module loading, Buffer, and projected console output. Browser
-globals such as DOM objects, fetch, WebSocket, and storage are absent. This is an execution-domain
-contract rather than a second security boundary; authentication remains the security boundary.
-
-An ordinary task copies one result and ends its Worker. A returned synchronous or asynchronous
-generator becomes a browser async iterator. Yielded values use the same binary MessagePack value
-contract as ordinary results. The browser grants credits in bounded batches, which lets nearby
-yields cross without a request per item while limiting buffered output. Iterator cancellation
-calls the generator's return path and terminates the Worker; connection shutdown terminates every
-active task.
-
 ## Native addons
 
 Lumiana detects `.node` imports during bundling. The JavaScript package around the addon remains in
 the browser. The production manifest contains only the package that owns the native binary, so the
 Worker can load that binary.
+
+The standalone production entry treats that manifest as an executable deployment contract. Before
+opening the server, it checks for every recorded package under its own `node_modules` and invokes
+the package manager selected by the application's lockfile only when packages are missing. Native
+install scripts therefore run in the deployment environment, while an already-prepared deployment
+starts without an installation step.
 
 CommonJS addon loaders often receive only a binary basename and discover its installed path from
 `__filename`. That discovery cannot run after bundling because the browser bundle is no longer in

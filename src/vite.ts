@@ -605,6 +605,20 @@ export function lumiana(options: LumianaPluginOptions = {}): Plugin {
       for (const name of ['host.js', 'worker.js', 'run-worker.js'])
         await fs.copyFile(path.join(runtimeDir, name), path.join(destination, name));
       const dependencies = await addons.dependencies();
+      let packageManager = 'npm';
+      for (const [file, manager] of [
+        ['bun.lock', 'bun'],
+        ['bun.lockb', 'bun'],
+        ['pnpm-lock.yaml', 'pnpm'],
+        ['yarn.lock', 'yarn'],
+        ['package-lock.json', 'npm'],
+      ] as const) {
+        try {
+          await fs.access(path.join(config.root, file));
+          packageManager = manager;
+          break;
+        } catch {}
+      }
       await fs.writeFile(
         path.join(deploymentDir, 'package.json'),
         JSON.stringify(
@@ -622,9 +636,38 @@ export function lumiana(options: LumianaPluginOptions = {}): Plugin {
       await fs.writeFile(
         path.join(deploymentDir, 'main.mjs'),
         `import { serve } from './server/host.js';
+import { existsSync } from 'node:fs';
+import { spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 
 const root = fileURLToPath(new URL('.', import.meta.url));
+const dependencies = ${JSON.stringify(Object.keys(dependencies))};
+const missing = dependencies.filter(name =>
+  !existsSync(new URL('./node_modules/' + name + '/package.json', import.meta.url))
+);
+if (missing.length) {
+  const installers = {
+    bun: ['bun', ['install', '--production']],
+    npm: ['npm', ['install', '--omit=dev']],
+    pnpm: ['pnpm', ['install', '--prod', '--no-frozen-lockfile']],
+    yarn: ['yarn', ['install']],
+  };
+  console.log('Installing Lumiana engine dependencies: ' + missing.join(', '));
+  const preferred = ${JSON.stringify(packageManager)};
+  const order = [preferred, ...Object.keys(installers).filter(name => name !== preferred)];
+  let installed = false;
+  for (const name of order) {
+    const [program, args] = installers[name];
+    const installation = spawnSync(program, args, { cwd: root, stdio: 'inherit' });
+    if (installation.error?.code === 'ENOENT') continue;
+    if (installation.error) throw installation.error;
+    if (installation.status !== 0)
+      throw new Error(program + ' failed to install Lumiana engine dependencies');
+    installed = true;
+    break;
+  }
+  if (!installed) throw new Error('No supported package manager is available');
+}
 const server = await serve({
   root,
   clientDir: fileURLToPath(new URL('./client/', import.meta.url)),

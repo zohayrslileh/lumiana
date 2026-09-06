@@ -269,6 +269,8 @@ test('Vite keeps package JavaScript local and deploys only detected native addon
     assert.ok((await fs.stat(path.join(root, 'dist/server/worker.js'))).size > 0);
     assert.ok((await fs.stat(path.join(root, 'dist/server/run-worker.js'))).size > 0);
     const main = await fs.readFile(path.join(root, 'dist/main.mjs'), 'utf8');
+    assert.ok(main.includes("existsSync(new URL('./node_modules/' + name + '/package.json'"));
+    assert.ok(main.includes('Installing Lumiana engine dependencies:'));
     assert.ok(main.includes('username: process.env.LUMIANA_USERNAME ?? "build-user"'));
     assert.ok(main.includes('password: process.env.LUMIANA_PASSWORD ?? "build-password"'));
   } finally {
