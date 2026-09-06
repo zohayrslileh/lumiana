@@ -84,6 +84,11 @@ export class NetworkKernel {
     return handle;
   }
 
+  adoptSocket(socket: Socket) {
+    const handle = this.attachSocket(socket, true);
+    return { handle, ...this.socketInfo(socket) };
+  }
+
   async close(): Promise<void> {
     const servers = [...this.servers.values()];
     const sockets = [...this.sockets.values()];
@@ -226,6 +231,12 @@ export class NetworkKernel {
       case 'net.resume':
         this.sockets.get(Number(args[0]))?.resume();
         return undefined;
+      case 'net.ref':
+        this.sockets.get(Number(args[0]))?.ref();
+        return;
+      case 'net.unref':
+        this.sockets.get(Number(args[0]))?.unref();
+        return;
       case 'net.setNoDelay':
         this.socket(Number(args[0])).setNoDelay(args[1]);
         return undefined;

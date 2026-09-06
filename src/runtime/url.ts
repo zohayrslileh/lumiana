@@ -1,6 +1,6 @@
 import { Buffer } from 'buffer';
 import legacy from 'url/url.js';
-import path from 'path-browserify';
+import path from './path.js';
 import punycode from 'punycode/punycode.js';
 import process from './process.js';
 

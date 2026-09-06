@@ -2,7 +2,7 @@ import assert from 'assert';
 import * as buffer from 'buffer';
 import crypto from './crypto.js';
 import EventEmitter from 'events';
-import path from 'path-browserify';
+import path from './path.js';
 import process from './process.js';
 import querystring from 'querystring-es3';
 import stream from 'stream-browserify';
@@ -29,6 +29,7 @@ import workerThreads from './worker-threads.js';
 
 const local: Record<string, any> = Object.assign(Object.create(null), {
   assert,
+  'assert/strict': assert.strict,
   buffer,
   child_process: childProcess,
   crypto,

@@ -1,8 +1,10 @@
 import { EventEmitter } from 'events';
 import { kernelCall, kernelSubscribe } from './bridge.js';
 import { createHttp } from './http-core.js';
+import { createHttpClient } from './http-client.js';
 
 const runtime = createHttp(kernelCall, kernelSubscribe);
+export const { ClientRequest, request, get } = createHttpClient(kernelCall, kernelSubscribe);
 
 export const { Server, IncomingMessage, ServerResponse, createServer } = runtime;
 
@@ -120,6 +122,9 @@ export class Agent extends EventEmitter {
 export const globalAgent = new Agent();
 
 export default {
+  ClientRequest,
+  request,
+  get,
   Agent,
   IncomingMessage,
   METHODS,

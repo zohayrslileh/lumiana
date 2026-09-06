@@ -17,6 +17,7 @@ interface ProcessState {
   runtime: typeof processShim & Record<string, any>;
   env: Record<string, string>;
   directory: string;
+  listeners?: Set<() => void>;
 }
 
 const key = Symbol.for('lumiana.process');
@@ -27,6 +28,13 @@ const state: ProcessState = (scope[key] ??= {
   directory: '/',
 });
 const { runtime, env } = state;
+const listeners = (state.listeners ??= new Set());
+
+/** Keep local platform-dependent bindings in sync with connection metadata. */
+export function observeProcess(listener: () => void): void {
+  listeners.add(listener);
+  listener();
+}
 
 if (runtime.env !== env) {
   Object.defineProperty(runtime, 'env', {
@@ -58,6 +66,7 @@ export function initializeProcess(snapshot: ProcessSnapshot): void {
       writable: true,
       value: snapshot[key],
     });
+  for (const listener of listeners) listener();
 }
 
 export default runtime;

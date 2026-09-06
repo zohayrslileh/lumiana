@@ -126,7 +126,12 @@ export class NativeAddons {
         }
       } catch {}
     }
-    const owner = this.owner(importer);
+    let owner: { name: string; root: string };
+    try {
+      owner = this.owner(importer);
+    } catch {
+      return undefined;
+    }
     const binaries: string[] = [];
     const visit = async (directory: string): Promise<void> => {
       for (const entry of await fs.readdir(directory, { withFileTypes: true })) {
@@ -165,7 +170,7 @@ export class NativeAddons {
   }
 }
 export interface TransformOptions {
-  place(id: string, requiredExports?: string[]): Promise<Placement>;
+  place(id: string, requiredExports?: string[], kind?: 'import' | 'require'): Promise<Placement>;
   /** Whether unqualified Node globals belong to this module's execution contract. */
   nodeGlobals?: boolean;
   client?: string;
@@ -400,7 +405,8 @@ export async function transformSource(source: string, id: string, options: Trans
               continue;
             }
           }
-          if ((await options.place(specifier)).available === false) unavailable.add(specifier);
+          if ((await options.place(specifier, [], 'require')).available === false)
+            unavailable.add(specifier);
         }
       }
       edits.appendLeft(
@@ -482,8 +488,23 @@ export async function transformSource(source: string, id: string, options: Trans
           : n.type === 'CallExpression'
             ? extendRead(p).keys.slice(0, 1)
             : [];
-    const placement = await options.place(specifier, requiredExports);
-    if (placement.replacement) {
+    const placement = await options.place(
+      specifier,
+      requiredExports,
+      n.type === 'CallExpression' ? 'require' : 'import',
+    );
+    if (placement.available === false && isBuiltin(specifier) && n.type !== 'CallExpression')
+      throw new Error(`Lumiana has no local runtime contract for ${JSON.stringify(specifier)}`);
+    if (placement.available === false && n.type === 'CallExpression') {
+      // Preserve optional require semantics: failure happens at the call, where
+      // the package's own try/catch can choose its normal fallback.
+      edits.overwrite(
+        n.start,
+        n.end,
+        `(()=>{const error=new Error(${JSON.stringify('Cannot find module ' + specifier)});error.code='MODULE_NOT_FOUND';throw error})()`,
+      );
+      moduleSourceChanged = true;
+    } else if (placement.replacement) {
       edits.overwrite(sourceNode.start, sourceNode.end, JSON.stringify(placement.replacement));
       moduleSourceChanged = true;
     }
@@ -526,12 +547,14 @@ export async function transformSource(source: string, id: string, options: Trans
   if (options.locateAddon)
     for (const p of dynamicRequires) {
       const hint = addonHint(p.node.arguments[0], p.scope);
-      if (!hint || !(await options.locateAddon(hint, true))) continue;
+      // A computed filename can be selected by control flow, not just by its
+      // initializer. Discover addon ownership now; select its actual path at runtime.
+      if (!(await options.locateAddon(hint ?? '', true))) continue;
       used.add('nativeAddon');
       edits.overwrite(
         p.node.callee.start,
         p.node.callee.end,
-        `(specifier=>${addonName}(specifier,${JSON.stringify(options.origin)}))`,
+        `(specifier=>typeof specifier==='string'&&specifier.endsWith('.node')?${addonName}(specifier,${JSON.stringify(options.origin)}):require(specifier))`,
       );
     }
 

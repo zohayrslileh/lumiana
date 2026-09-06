@@ -49,6 +49,31 @@ const statValues = (values: any[]) => values.map((value) => statResult(value));
 const directoryValues = (values: any[], args: any[]) =>
   args.at(-1)?.withFileTypes ? [values[0].map(directoryResult)] : values;
 const binaryValues = (values: any[], args: any[]) => [fileResult(values[0], args[1])];
+const bytes = (view: ArrayBufferView) =>
+  new Uint8Array(view.buffer, view.byteOffset, view.byteLength);
+const readValues = ([count, returned]: any[], args: any[]) => {
+  const target = ArrayBuffer.isView(args[1]) ? args[1] : args[1]?.buffer;
+  if (!target) return [count, Buffer.from(returned)];
+  const offset =
+    (ArrayBuffer.isView(args[1])
+      ? typeof args[2] === 'object'
+        ? args[2]?.offset
+        : args[2]
+      : args[1]?.offset) ?? 0;
+  bytes(target).set(bytes(returned).subarray(offset, offset + count), offset);
+  return [count, target];
+};
+const readvValues = ([count, returned]: any[], args: any[]) => {
+  let remaining = count;
+  for (let i = 0; i < args[1].length && remaining > 0; i++) {
+    const target = bytes(args[1][i]);
+    const length = Math.min(remaining, target.byteLength);
+    target.set(bytes(returned[i]).subarray(0, length));
+    remaining -= length;
+  }
+  return [count, args[1]];
+};
+const writeValues = (values: any[], args: any[]) => [values[0], args[1]];
 
 export const access = callback('access');
 export const appendFile = callback('appendFile');
@@ -75,11 +100,11 @@ export const mkdir = callback('mkdir');
 export const mkdtemp = callback('mkdtemp');
 export const open = callback('open');
 export const opendir = callback('opendir');
-export const read = callback('read');
+export const read = callback('read', readValues);
 export const readFile = callback('readFile', binaryValues);
 export const readdir = callback('readdir', directoryValues);
 export const readlink = callback('readlink');
-export const readv = callback('readv');
+export const readv = callback('readv', readvValues);
 export const realpath = callback('realpath');
 export const rename = callback('rename');
 export const rm = callback('rm');
@@ -90,9 +115,9 @@ export const symlink = callback('symlink');
 export const truncate = callback('truncate');
 export const unlink = callback('unlink');
 export const utimes = callback('utimes');
-export const write = callback('write');
+export const write = callback('write', writeValues);
 export const writeFile = callback('writeFile');
-export const writev = callback('writev');
+export const writev = callback('writev', writeValues);
 
 export const accessSync = sync('accessSync');
 export const appendFileSync = sync('appendFileSync');
@@ -124,8 +149,8 @@ export const readdirSync = sync('readdirSync', (value, args) =>
   args[1]?.withFileTypes ? value.map(directoryResult) : value,
 );
 export const readlinkSync = sync('readlinkSync');
-export const readSync = sync('readSync');
-export const readvSync = sync('readvSync');
+export const readSync = sync('readSync', (value, args) => readValues(value, args)[0]);
+export const readvSync = sync('readvSync', (value, args) => readvValues(value, args)[0]);
 export const realpathSync = sync('realpathSync');
 export const renameSync = sync('renameSync');
 export const rmSync = sync('rmSync');

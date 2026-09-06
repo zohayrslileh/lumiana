@@ -203,7 +203,7 @@ Lumiana currently provides browser-owned contracts for:
 
 - `node:fs`, including callback, Promise, synchronous, stream, and watcher forms
 - `node:net`, including TCP and Unix sockets
-- the server half of `node:http`
+- `node:http` servers, streaming clients, and connection upgrades
 - `node:child_process`, including local streams and lifecycle events
 - `node:os` and local stable system information
 - `node:crypto` and `node:zlib`
@@ -301,6 +301,11 @@ bun run dev
 
 The complete xterm.js and `node-pty` example is in `examples/terminal`. Use the same commands with
 `cd examples/terminal` to run it.
+
+The [compatibility examples](examples/compatibility/README.md) exercise eleven original Node
+libraries alongside the DOM, starting with `ws`. Each example contains assertions and resource
+cleanup and can run in development or production preview. The README records coverage and known
+limitations.
 
 The playground has separate dependencies. Run `bun install` inside `playground` before using its
 scripts.

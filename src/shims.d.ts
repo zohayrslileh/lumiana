@@ -8,7 +8,7 @@ declare module 'process/browser' {
   export default process;
 }
 
-declare module 'path-browserify' {
+declare module 'path-browserify-win32' {
   const path: typeof import('node:path');
   export default path;
 }

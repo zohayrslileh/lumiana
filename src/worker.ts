@@ -49,7 +49,7 @@ const kernelEvent = (handle: number, event: string, ...args: any[]) =>
 
 const files = new FileKernel(kernelEvent, allocateHandle);
 const network = new NetworkKernel(kernelEvent, allocateHandle);
-const http = new HttpKernel(kernelEvent, allocateHandle);
+const http = new HttpKernel(kernelEvent, allocateHandle, network);
 const system = new SystemKernel();
 const children = new ChildProcessKernel(kernelEvent, allocateHandle);
 const addons = new AddonKernel(workerData.root, allocateHandle, invokeCallback);

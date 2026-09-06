@@ -1,6 +1,30 @@
 import zlib from 'browserify-zlib';
 
 export const {
+  Z_NO_FLUSH,
+  Z_PARTIAL_FLUSH,
+  Z_SYNC_FLUSH,
+  Z_FULL_FLUSH,
+  Z_FINISH,
+  Z_BLOCK,
+  Z_OK,
+  Z_STREAM_END,
+  Z_NEED_DICT,
+  Z_ERRNO,
+  Z_STREAM_ERROR,
+  Z_DATA_ERROR,
+  Z_MEM_ERROR,
+  Z_BUF_ERROR,
+  Z_VERSION_ERROR,
+  Z_NO_COMPRESSION,
+  Z_BEST_SPEED,
+  Z_BEST_COMPRESSION,
+  Z_DEFAULT_COMPRESSION,
+  Z_FILTERED,
+  Z_HUFFMAN_ONLY,
+  Z_RLE,
+  Z_FIXED,
+  Z_DEFAULT_STRATEGY,
   Deflate,
   DeflateRaw,
   Gunzip,
@@ -32,4 +56,7 @@ export const {
   unzip,
   unzipSync,
 } = zlib as any;
-export default zlib;
+export const constants = Object.freeze(
+  Object.fromEntries(Object.entries(zlib).filter(([name]) => name.startsWith('Z_'))),
+);
+export default { ...zlib, constants };

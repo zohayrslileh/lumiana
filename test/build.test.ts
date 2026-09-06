@@ -10,6 +10,20 @@ import {
   transformSource,
 } from '../src/build.js';
 
+test('unavailable CommonJS dependencies fail at the require call so package fallbacks work', async () => {
+  const source = `let result;try { require('optional-addon'); } catch (error) { result = error.code; } module.exports = result;`;
+  const transformed = await transformSource(source, 'optional.cjs', {
+    place: async () => ({ available: false }),
+  });
+  const module = { exports: undefined };
+  new Function('module', transformed!.code)(module);
+  assert.equal(module.exports, 'MODULE_NOT_FOUND');
+  const required = await transformSource("require('required-addon');", 'required.cjs', {
+    place: async () => ({ available: false }),
+  });
+  assert.throws(() => new Function(required!.code)(), { code: 'MODULE_NOT_FOUND' });
+});
+
 test('both Node builtin specifier forms establish Node execution provenance', () => {
   for (const source of [
     "const fs = require('fs');",
@@ -412,9 +426,36 @@ test('packages remain local and native-addon ownership is tracked independently'
     assert.match(computed!.code, /nativeAddon:__lumiana/);
     assert.match(
       computed!.code,
-      /specifier=>__lumiana\d+\(specifier,"node_modules\/native-package\/computed-loader\.cjs"\)\)\(file\)/,
+      /__lumiana\d+\(specifier,"node_modules\/native-package\/computed-loader\.cjs"\)/,
     );
     assert.doesNotMatch(computed!.code, /require\(file\)/);
+
+    const selected = await transformSource(
+      'const filename = select(); module.exports = require(filename);',
+      path.join(packageRoot, 'selected.cjs'),
+      {
+        origin: 'node_modules/native-package/selected.cjs',
+        locateAddon: (request, computed) =>
+          addons.locate(request, path.join(packageRoot, 'selected.cjs'), computed),
+        place: async () => ({}),
+      },
+    );
+    const scope = {
+      [Symbol.for('lumiana.runtime')]: { nativeAddon: (filename: string) => 'native:' + filename },
+    };
+    for (const [filename, expected] of [
+      ['/prebuilt/selected.node', 'native:/prebuilt/selected.node'],
+      ['ordinary-package', 'local:ordinary-package'],
+    ]) {
+      const module = { exports: undefined };
+      new Function('globalThis', 'module', 'select', 'require', selected!.code)(
+        scope,
+        module,
+        () => filename,
+        (name: string) => 'local:' + name,
+      );
+      assert.equal(module.exports, expected);
+    }
 
     const concatenated = await transformSource(
       "module.exports=name=>require('./prebuilds/'+process.platform+'-'+process.arch+'/'+name+'.node');",

@@ -1,5 +1,6 @@
 import http, { type IncomingMessage, type Server, type ServerResponse } from 'node:http';
-import type { KernelEvent } from './network.js';
+import { NetworkKernel, type KernelEvent } from './network.js';
+import type { Socket } from 'node:net';
 
 const errorRecord = (error: NodeJS.ErrnoException & { address?: string; port?: number }) => ({
   name: error.name,
@@ -21,6 +22,7 @@ export class HttpKernel {
   constructor(
     private event: KernelEvent,
     private allocate: () => number = () => ++this.sequence,
+    private network = new NetworkKernel(event, allocate),
   ) {}
 
   private server(handle: number): Server {
@@ -89,6 +91,7 @@ export class HttpKernel {
   }
 
   async close(): Promise<void> {
+    await this.network.close();
     const servers = [...this.servers.values()];
     this.servers.clear();
     for (const response of this.responses.values()) response.destroy();
@@ -114,6 +117,18 @@ export class HttpKernel {
           this.attach(handle, request, response),
         );
         this.servers.set(handle, server);
+        for (const event of ['upgrade', 'connect'] as const)
+          server.on(event, (request, socket, head) => {
+            this.event(handle, event, {
+              method: request.method,
+              url: request.url,
+              headers: request.headers,
+              rawHeaders: request.rawHeaders,
+              httpVersion: request.httpVersion,
+              socket: this.network.adoptSocket(socket as Socket),
+              head: new Uint8Array(head),
+            });
+          });
         server.on('listening', () => this.event(handle, 'listening', server.address()));
         server.on('close', () => {
           this.servers.delete(handle);

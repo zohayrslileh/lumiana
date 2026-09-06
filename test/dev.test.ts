@@ -8,6 +8,73 @@ import { init, parse } from 'es-module-lexer';
 import { lumiana } from '../dist/vite.js';
 
 test(
+  'dependency optimization preserves CommonJS require export conditions',
+  { timeout: 15_000 },
+  async () => {
+    const root = await fs.mkdtemp(path.join(process.cwd(), 'node_modules/.lumiana-conditions-'));
+    const consumer = path.join(root, 'node_modules/contract-consumer');
+    const dependency = path.join(root, 'node_modules/contract-mode');
+    await fs.mkdir(consumer, { recursive: true });
+    await fs.mkdir(dependency, { recursive: true });
+    await fs.writeFile(path.join(root, 'package.json'), '{"type":"module"}');
+    await fs.writeFile(
+      path.join(root, 'index.html'),
+      '<script type="module" src="/main.js"></script>',
+    );
+    await fs.writeFile(
+      path.join(root, 'main.js'),
+      "import result from 'contract-consumer';console.log(result);",
+    );
+    await fs.writeFile(
+      path.join(consumer, 'package.json'),
+      '{"name":"contract-consumer","main":"index.cjs"}',
+    );
+    await fs.writeFile(
+      path.join(consumer, 'index.cjs'),
+      "const path=require('node:path');module.exports=require('contract-mode')(path.sep);",
+    );
+    await fs.writeFile(
+      path.join(dependency, 'package.json'),
+      JSON.stringify({
+        name: 'contract-mode',
+        exports: { import: './import.mjs', require: './require.cjs' },
+      }),
+    );
+    await fs.writeFile(
+      path.join(dependency, 'import.mjs'),
+      "export default ()=>'wrong-import-mode';",
+    );
+    await fs.writeFile(
+      path.join(dependency, 'require.cjs'),
+      "module.exports=()=> 'correct-require-mode';",
+    );
+    const server = await createServer({
+      root,
+      configFile: false,
+      logLevel: 'silent',
+      plugins: [lumiana()],
+      optimizeDeps: { include: ['contract-consumer'] },
+      server: { host: '127.0.0.1', port: 0 },
+    });
+    try {
+      await server.listen();
+      const origin = `http://127.0.0.1:${(server.httpServer!.address() as { port: number }).port}`;
+      const main = await (await fetch(origin + '/main.js')).text();
+      await init;
+      const specifier = parse(main)[0].find((item) => item.n?.includes('contract-consumer'))!.n!;
+      const response = await fetch(origin + specifier);
+      assert.equal(response.status, 200);
+      const code = await response.text();
+      assert.ok(code.includes('correct-require-mode'));
+      assert.ok(!code.includes('wrong-import-mode'));
+    } finally {
+      await server.close();
+      await fs.rm(root, { recursive: true, force: true });
+    }
+  },
+);
+
+test(
   'dev serves linked browser runtime files while preserving filesystem restrictions',
   { timeout: 15_000 },
   async () => {

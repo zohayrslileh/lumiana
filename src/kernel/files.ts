@@ -124,7 +124,9 @@ export class FileKernel {
     const fn = (nodeFS as any)[name];
     if (typeof fn !== 'function')
       throw new TypeError(`Unknown synchronous filesystem operation ${operation}`);
-    return transfer(Reflect.apply(fn, nodeFS, args));
+    const value = Reflect.apply(fn, nodeFS, args);
+    if (name === 'readSync' || name === 'readvSync') return [value, args[1]];
+    return transfer(value);
   }
 
   async execute(operation: string, args: any[]): Promise<any> {

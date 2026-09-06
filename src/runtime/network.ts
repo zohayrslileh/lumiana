@@ -11,7 +11,26 @@ export type KernelSubscribe = (
 ) => () => void;
 
 const socketOptions = (args: any[]) => {
-  if (typeof args[0] === 'object') return { ...args[0] };
+  if (typeof args[0] === 'object')
+    return Object.fromEntries(
+      [
+        'port',
+        'host',
+        'path',
+        'localAddress',
+        'localPort',
+        'family',
+        'hints',
+        'autoSelectFamily',
+        'autoSelectFamilyAttemptTimeout',
+        'noDelay',
+        'keepAlive',
+        'keepAliveInitialDelay',
+        'timeout',
+      ]
+        .filter((key) => args[0][key] !== undefined)
+        .map((key) => [key, args[0][key]]),
+    );
   if (typeof args[0] === 'string') return { path: args[0] };
   return { port: args[0], ...(typeof args[1] === 'string' ? { host: args[1] } : {}) };
 };
@@ -36,6 +55,7 @@ export function createNetwork(call: KernelCall, subscribe: KernelSubscribe): any
   class Socket extends Duplex {
     private handle?: number;
     private release?: () => void;
+    private settings = new Map<string, any[]>();
     connecting = false;
     pending = true;
     readyState: 'opening' | 'open' | 'readOnly' | 'writeOnly' | 'closed' = 'closed';
@@ -91,6 +111,12 @@ export function createNetwork(call: KernelCall, subscribe: KernelSubscribe): any
         ({ handle }) => {
           this.handle = handle;
           this.release = subscribe(handle, (event, values) => this.incoming(event, values));
+          if (this.destroyed) {
+            void call('net.destroy', handle);
+            return;
+          }
+          for (const [name, values] of this.settings) this.configure(name, ...values);
+          this.settings.clear();
         },
         (reason) => this.emit('error', reason),
       );
@@ -110,6 +136,30 @@ export function createNetwork(call: KernelCall, subscribe: KernelSubscribe): any
       void call('net.write', this.handle, new Uint8Array(bytes)).then(() => done(), done);
     }
 
+    _writev(
+      chunks: { chunk: Buffer; encoding: BufferEncoding }[],
+      done: (error?: Error | null) => void,
+    ) {
+      this._write(
+        Buffer.concat(
+          chunks.map(({ chunk, encoding }) =>
+            typeof chunk === 'string' ? Buffer.from(chunk, encoding) : Buffer.from(chunk),
+          ),
+        ),
+        'buffer' as BufferEncoding,
+        done,
+      );
+    }
+
+    ref() {
+      if (this.handle !== undefined) void call('net.ref', this.handle);
+      return this;
+    }
+    unref() {
+      if (this.handle !== undefined) void call('net.unref', this.handle);
+      return this;
+    }
+
     _final(done: (error?: Error | null) => void) {
       if (this.handle === undefined) {
         done();
@@ -124,20 +174,25 @@ export function createNetwork(call: KernelCall, subscribe: KernelSubscribe): any
     }
 
     setNoDelay(enable = true) {
-      if (this.handle !== undefined) void call('net.setNoDelay', this.handle, enable);
+      this.configure('net.setNoDelay', enable);
       return this;
     }
 
     setKeepAlive(enable = false, initialDelay = 0) {
-      if (this.handle !== undefined)
-        void call('net.setKeepAlive', this.handle, enable, initialDelay);
+      this.configure('net.setKeepAlive', enable, initialDelay);
       return this;
     }
 
     setTimeout(timeout: number, done?: () => void) {
       if (done) this.once('timeout', done);
-      if (this.handle !== undefined) void call('net.setTimeout', this.handle, timeout);
+      this.configure('net.setTimeout', timeout);
       return this;
+    }
+
+    private configure(name: string, ...values: any[]) {
+      if (this.handle === undefined) this.settings.set(name, values);
+      else if (!this.destroyed)
+        void call(name, this.handle, ...values).catch((reason) => this.destroy(reason));
     }
   }
 

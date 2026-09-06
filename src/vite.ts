@@ -31,12 +31,13 @@ const localBuiltins: Record<string, string> = Object.assign(Object.create(null),
   events: 'events/',
   buffer: 'buffer/',
   assert: 'assert/',
-  path: 'path-browserify',
   querystring: 'querystring-es3',
   stream: 'stream-browserify',
   string_decoder: 'string_decoder/',
 });
 const runtimeBuiltins: Record<string, string> = Object.assign(Object.create(null), {
+  path: 'runtime/path.js',
+  'assert/strict': 'runtime/assert-strict.js',
   child_process: 'runtime/child-process.js',
   fs: 'runtime/fs.js',
   'fs/promises': 'runtime/fs-promises.js',
@@ -65,6 +66,8 @@ const exact = (id: string) => new RegExp(`^${id.replace(/[.*+?^${}()|[\]\\]/g, '
 export function lumiana(options: LumianaPluginOptions = {}): Plugin {
   let resolveBrowser: ReturnType<ResolvedConfig['createResolver']>;
   let resolveNode: ReturnType<ResolvedConfig['createResolver']>;
+  let requireBrowser: ReturnType<ResolvedConfig['createResolver']>;
+  let requireNode: ReturnType<ResolvedConfig['createResolver']>;
   let config: ResolvedConfig,
     addons: NativeAddons,
     deploymentDir: string,
@@ -72,6 +75,20 @@ export function lumiana(options: LumianaPluginOptions = {}): Plugin {
     failed = false;
   const execution = new Map<string, Promise<boolean>>();
   const nodeFiles = new Set<string>();
+  const implementationFiles = new Set<string>();
+  let devServer: any;
+  const implementation = (id?: string) =>
+    !!id && (id.startsWith(runtimeDir + '/') || implementationFiles.has(id.split('?')[0]!));
+  const implementationDependency = (file: string) => {
+    implementationFiles.add(file.split('?')[0]!);
+    return file;
+  };
+  const serveDependency = (file: string) => {
+    const optimizer = devServer?.environments?.client?.depsOptimizer ?? devServer?._depsOptimizer;
+    if (optimizer && file.includes('/node_modules/') && !file.startsWith('\0'))
+      return optimizer.getOptimizedDepId(optimizer.registerMissingImport(file, file));
+    return file;
+  };
   const nodeContract = (file: string) => {
     nodeFiles.add(file.split('?')[0]!);
     return file;
@@ -112,7 +129,7 @@ export function lumiana(options: LumianaPluginOptions = {}): Plugin {
     );
   };
   const usesNodeEnvironment = (id?: string) => {
-    if (!id || id.startsWith('\0')) return Promise.resolve(false);
+    if (!id || id.startsWith('\0') || implementation(id)) return Promise.resolve(false);
     const file = id.split('?')[0]!;
     // Application modules are composition roots: one Node import must not alter
     // the export conditions of their unrelated package imports. A dependency's
@@ -129,8 +146,14 @@ export function lumiana(options: LumianaPluginOptions = {}): Plugin {
     }
     return pending;
   };
-  const moduleResolver = async (importer?: string) =>
-    (await usesNodeEnvironment(importer)) ? resolveNode : resolveBrowser;
+  const moduleResolver = async (importer?: string, require = false) =>
+    (await usesNodeEnvironment(importer))
+      ? require
+        ? requireNode
+        : resolveNode
+      : require
+        ? requireBrowser
+        : resolveBrowser;
   return {
     name: 'lumiana',
     enforce: 'pre',
@@ -141,7 +164,7 @@ export function lumiana(options: LumianaPluginOptions = {}): Plugin {
       deploymentDir = path.resolve(root, user.build?.outDir ?? 'dist');
       const require = createRequire(path.join(root, 'package.json'));
       const localAliases = Object.entries(localBuiltins).flatMap(([id, target]) => {
-        const replacement = nodeContract(runtimeRequire.resolve(target));
+        const replacement = implementationDependency(runtimeRequire.resolve(target));
         return [
           { find: exact(id), replacement },
           { find: exact(`node:${id}`), replacement },
@@ -158,8 +181,7 @@ export function lumiana(options: LumianaPluginOptions = {}): Plugin {
       ) => {
         if (localBuiltins[builtinName(id)] || runtimeBuiltins[builtinName(id)])
           return { available: true };
-        if (isBuiltin(id))
-          throw new Error(`Lumiana has no local runtime contract for ${JSON.stringify(id)}`);
+        if (isBuiltin(id)) return { available: false };
         let resolved: string | undefined;
         try {
           resolved = resolve
@@ -171,6 +193,7 @@ export function lumiana(options: LumianaPluginOptions = {}): Plugin {
             resolved &&
             (path.isAbsolute(resolved) ||
               resolved.startsWith('\0') ||
+              resolved.startsWith('__vite-browser-external') ||
               resolved.startsWith('file:')),
           ),
         };
@@ -204,7 +227,12 @@ export function lumiana(options: LumianaPluginOptions = {}): Plugin {
                 plugins: [
                   {
                     name: 'lumiana-dependencies',
-                    async resolveId(this: any, id: string, importer?: string) {
+                    async resolveId(
+                      this: any,
+                      id: string,
+                      importer?: string,
+                      options?: { kind?: string },
+                    ) {
                       if (id.endsWith('.node')) {
                         const file = path.isAbsolute(id)
                           ? id
@@ -217,17 +245,27 @@ export function lumiana(options: LumianaPluginOptions = {}): Plugin {
                       const runtime = runtimeBuiltins[builtinName(id)];
                       if (runtime) return nodeContract(path.join(runtimeDir, runtime));
                       const local = localBuiltins[builtinName(id)];
-                      if (local) return nodeContract(runtimeRequire.resolve(local));
+                      if (local) return implementationDependency(runtimeRequire.resolve(local));
                       if (id === 'lumiana/client') return { id, external: true };
-                      const resolver = await moduleResolver(importer);
-                      if (resolver === resolveNode) {
+                      const resolver = await moduleResolver(
+                        importer,
+                        options?.kind === 'require-call',
+                      );
+                      if (implementation(importer)) {
                         const resolved = await resolver(id, importer);
-                        if (resolved) {
+                        if (resolved && !resolved.startsWith('__vite-optional-peer-dep:'))
+                          return implementationDependency(resolved);
+                      }
+                      if (resolver === resolveNode || resolver === requireNode) {
+                        const resolved = await resolver(id, importer);
+                        if (resolved && !resolved.startsWith('__vite-optional-peer-dep:')) {
                           return nodeContract(resolved);
                         }
                       }
                     },
                     load(id: string) {
+                      // A false browser mapping is an empty module, not a missing file.
+                      if (id.startsWith('__vite-browser-external')) return 'module.exports = {};';
                       if (id.startsWith(addonPrefix)) {
                         const target = addonTarget(id);
                         return `import {nativeAddon} from ${JSON.stringify(runtimeSpecifier)};export default nativeAddon(${JSON.stringify(target.specifier)},${JSON.stringify(target.origin)});`;
@@ -236,12 +274,12 @@ export function lumiana(options: LumianaPluginOptions = {}): Plugin {
                     async transform(this: any, code: string, id: string) {
                       if (skip(id)) return null;
                       return transformSource(code, id, {
-                        place: (specifier, required) =>
+                        place: (specifier, required, kind) =>
                           placeModule(
                             specifier,
                             id,
                             async (specifier, source = id) =>
-                              (await moduleResolver(id))(specifier, source),
+                              (await moduleResolver(id, kind === 'require'))(specifier, source),
                             required,
                           ),
                         origin: path.relative(root, id),
@@ -269,15 +307,31 @@ export function lumiana(options: LumianaPluginOptions = {}): Plugin {
                         const runtime = runtimeBuiltins[builtinName(args.path)];
                         if (runtime) return { path: nodeContract(path.join(runtimeDir, runtime)) };
                         const local = localBuiltins[builtinName(args.path)];
-                        if (local) return { path: nodeContract(runtimeRequire.resolve(local)) };
+                        if (local)
+                          return { path: implementationDependency(runtimeRequire.resolve(local)) };
                         if (args.path === 'lumiana/client')
                           return { path: args.path, external: true };
-                        const resolver = await moduleResolver(args.importer || undefined);
-                        if (resolver === resolveNode) {
+                        const resolver = await moduleResolver(
+                          args.importer || undefined,
+                          args.kind === 'require-call',
+                        );
+                        if (implementation(args.importer)) {
+                          const resolved = await resolver(args.path, args.importer);
+                          if (resolved?.startsWith('__vite-browser-external'))
+                            return { path: resolved, namespace: 'lumiana-empty' };
+                          if (resolved && !resolved.startsWith('__vite-optional-peer-dep:'))
+                            return { path: implementationDependency(resolved) };
+                        }
+                        if (resolver === resolveNode || resolver === requireNode) {
                           const resolved = await resolver(args.path, args.importer || undefined);
-                          if (resolved) return { path: nodeContract(resolved) };
+                          if (resolved && !resolved.startsWith('__vite-optional-peer-dep:'))
+                            return { path: nodeContract(resolved) };
                         }
                       });
+                      build.onLoad({ filter: /.*/, namespace: 'lumiana-empty' }, () => ({
+                        contents: 'module.exports = {};',
+                        loader: 'js',
+                      }));
                       build.onResolve({ filter: /\.node$/ }, (args) => {
                         const file = path.isAbsolute(args.path)
                           ? args.path
@@ -301,12 +355,15 @@ export function lumiana(options: LumianaPluginOptions = {}): Plugin {
                         if (skip(args.path)) return;
                         const code = await fs.readFile(args.path, 'utf8');
                         const transformed = await transformSource(code, args.path, {
-                          place: (specifier, required) =>
+                          place: (specifier, required, kind) =>
                             placeModule(
                               specifier,
                               args.path,
                               async (specifier, source = args.path) =>
-                                (await moduleResolver(args.path))(specifier, source),
+                                (await moduleResolver(args.path, kind === 'require'))(
+                                  specifier,
+                                  source,
+                                ),
                               required,
                             ),
                           origin: path.relative(root, args.path),
@@ -333,7 +390,9 @@ export function lumiana(options: LumianaPluginOptions = {}): Plugin {
               },
             };
       return {
-        resolve: { alias: localAliases },
+        resolve: {
+          alias: localAliases,
+        },
         optimizeDeps: {
           exclude: ['lumiana/client', runtimeSpecifier],
           include: Object.keys(localBuiltins).flatMap((id) => [id, `node:${id}`]),
@@ -358,11 +417,27 @@ export function lumiana(options: LumianaPluginOptions = {}): Plugin {
         const file = normalizePath(path.join(runtimeDir, name));
         if (!config.server.fs.allow.includes(file)) config.server.fs.allow.push(file);
       }
-      resolveBrowser = config.createResolver({ scan: true });
+      resolveBrowser = config.createResolver({
+        scan: true,
+        conditions: ['module', 'browser', 'development|production'],
+        mainFields: ['browser', 'module', 'jsnext:main', 'jsnext'],
+      });
       resolveNode = config.createResolver({
         scan: true,
         mainFields: ['module', 'jsnext:main', 'jsnext'],
         conditions: ['module', 'node', 'development|production'],
+      });
+      requireBrowser = config.createResolver({
+        scan: true,
+        isRequire: true,
+        conditions: ['module', 'browser', 'development|production'],
+        mainFields: ['browser', 'module', 'jsnext:main', 'jsnext'],
+      });
+      requireNode = config.createResolver({
+        scan: true,
+        isRequire: true,
+        conditions: ['module', 'node', 'development|production'],
+        mainFields: ['module', 'jsnext:main', 'jsnext'],
       });
     },
     async resolveId(id, importer, resolveOptions) {
@@ -378,17 +453,28 @@ export function lumiana(options: LumianaPluginOptions = {}): Plugin {
       const runtime = runtimeBuiltins[builtinName(id)];
       if (runtime) return nodeContract(path.join(runtimeDir, runtime));
       const local = localBuiltins[builtinName(id)];
-      if (local) return nodeContract(runtimeRequire.resolve(local));
+      if (local) return implementationDependency(runtimeRequire.resolve(local));
       if (id === clientId) return id;
       if (id === runtimeId) return id;
+      if (nodeFiles.has(id.split('?')[0]!) && !(resolveOptions as { scan?: boolean }).scan)
+        return serveDependency(id);
+      if (implementation(importer)) {
+        const resolved = await (
+          (resolveOptions as any).kind === 'require-call' ? requireBrowser : resolveBrowser
+        )(id, importer);
+        if (resolved && !resolved.startsWith('__vite-optional-peer-dep:'))
+          return serveDependency(implementationDependency(resolved));
+      }
       if (importer && (await usesNodeEnvironment(importer))) {
-        const resolved = await resolveNode(id, importer);
+        const required = (resolveOptions as any).kind === 'require-call';
+        const resolved = await (required ? requireNode : resolveNode)(id, importer);
         if (resolved) {
           nodeContract(resolved);
           // Raw resolution establishes the execution environment. When both
           // environments select the same file, Vite still owns serving it,
           // including dependency optimization and CommonJS interoperability.
-          if (resolved !== (await resolveBrowser(id, importer))) return resolved;
+          if (resolved !== (await (required ? requireBrowser : resolveBrowser)(id, importer)))
+            return serveDependency(resolved);
         }
       }
     },
@@ -412,16 +498,18 @@ export function lumiana(options: LumianaPluginOptions = {}): Plugin {
         client: runtimeSpecifier,
         locateAddon: (request, computed) => addons.locate(request, id.split('?')[0]!, computed),
         nodeGlobals: !dependencyModule(id) || (await usesNodeEnvironment(id)),
-        place: (specifier, required) =>
+        place: (specifier, required, kind) =>
           placeModule(
             specifier,
             id,
-            async (specifier, source = id) => (await moduleResolver(id))(specifier, source),
+            async (specifier, source = id) =>
+              (await moduleResolver(id, kind === 'require'))(specifier, source),
             required,
           ),
       });
     },
     configureServer(server) {
+      devServer = server;
       if (!server.httpServer) throw new Error('Lumiana requires an HTTP server');
       const host = attachHost(server.httpServer, {
         root: config.root,

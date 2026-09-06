@@ -2,7 +2,7 @@ import stream from 'stream-browserify';
 import { EventEmitter } from 'events';
 import { Buffer } from 'buffer';
 import type { KernelCall } from './filesystem.js';
-import type { KernelSubscribe } from './network.js';
+import { createNetwork, type KernelSubscribe } from './network.js';
 
 const { Readable, Writable } = stream;
 const error = (value: any) => Object.assign(new Error(value.message), value);
@@ -21,6 +21,7 @@ const listenOptions = (args: any[]) => {
 };
 
 export function createHttp(call: KernelCall, subscribe: KernelSubscribe): any {
+  const { Socket } = createNetwork(call, subscribe);
   class Connection extends EventEmitter {
     destroyed = false;
     connecting = false;
@@ -70,7 +71,7 @@ export function createHttp(call: KernelCall, subscribe: KernelSubscribe): any {
       private handle: number,
       info: any,
     ) {
-      super();
+      super({ emitClose: false });
       this.method = info.method;
       this.url = info.url;
       this.headers = info.headers;
@@ -99,7 +100,10 @@ export function createHttp(call: KernelCall, subscribe: KernelSubscribe): any {
       } else if (event === 'error') this.emit('error', error(args[0]));
       else if (event === 'close') {
         this.release();
-        this.emit('close');
+        // The transport may deliver end and close in the same batch. Readable
+        // emits end only after its local buffer has been consumed.
+        if (this.complete && !this.readableEnded) this.once('end', () => this.emit('close'));
+        else this.emit('close');
       }
     }
 
@@ -123,6 +127,7 @@ export function createHttp(call: KernelCall, subscribe: KernelSubscribe): any {
     connection: Connection;
     private headers: Record<string, string | string[]> = Object.create(null);
     private sent = false;
+    private nativeFinished = false;
     private release: () => void;
 
     constructor(
@@ -133,16 +138,22 @@ export function createHttp(call: KernelCall, subscribe: KernelSubscribe): any {
       this.req = request;
       this.socket = this.connection = request.socket;
       this.release = subscribe(handle, (event, args) => {
-        if (event === 'finish') this.emit('finish');
+        if (event === 'finish') this.nativeFinished = true;
         else if (event === 'close') {
           this.release();
-          this.emit('close');
+          if (this.nativeFinished && !this.writableFinished)
+            this.once('finish', () => this.emit('close'));
+          else this.emit('close');
         } else if (event === 'error') this.emit('error', error(args[0]));
       });
     }
 
     get headersSent() {
       return this.sent;
+    }
+
+    get finished() {
+      return this.writableEnded;
     }
 
     setHeader(name: string, value: any) {
@@ -241,7 +252,13 @@ export function createHttp(call: KernelCall, subscribe: KernelSubscribe): any {
       );
     }
     private incoming(event: string, args: any[]) {
-      if (event === 'request') {
+      if (event === 'upgrade' || event === 'connect') {
+        const info = args[0];
+        const socket = new Socket(info.socket);
+        const request = new Readable({ read() {} });
+        Object.assign(request, info, { socket, connection: socket });
+        if (!this.emit(event, request, socket, Buffer.from(info.head))) socket.destroy();
+      } else if (event === 'request') {
         const info = args[0];
         const request = new IncomingMessage(info.request, info);
         const response = new ServerResponse(info.response, request);
