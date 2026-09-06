@@ -10,6 +10,7 @@
     "preview": "vite preview"
   },
   "dependencies": {
+    "@grpc/grpc-js": "^1.14.4",
     "@hono/node-server": "^2.1.1",
     "hono": "^4.13.7",
     "lumiana": "link:lumiana",

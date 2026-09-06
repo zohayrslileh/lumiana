@@ -48,6 +48,7 @@ export const resolveNs = resolver('resolveNs');
 export const resolvePtr = resolver('resolvePtr');
 export const resolveSoa = resolver('resolveSoa');
 export const resolveSrv = resolver('resolveSrv');
+export const resolveTlsa = resolver('resolveTlsa');
 export const resolveTxt = resolver('resolveTxt');
 export const reverse = resolver('reverse');
 
@@ -61,7 +62,96 @@ const promise =
   (method: string) =>
   (...args: any[]) =>
     kernelCall(`dns.${method}`, ...args);
+
+const resolverMethods = [
+  'resolve',
+  'resolve4',
+  'resolve6',
+  'resolveAny',
+  'resolveCaa',
+  'resolveCname',
+  'resolveMx',
+  'resolveNaptr',
+  'resolveNs',
+  'resolvePtr',
+  'resolveSoa',
+  'resolveSrv',
+  'resolveTlsa',
+  'resolveTxt',
+  'reverse',
+] as const;
+
+class ResolverState {
+  protected handle: number;
+
+  constructor(options?: any) {
+    this.handle = kernelCallSync('dns.resolver.create', options);
+  }
+
+  cancel(): void {
+    kernelCallSync('dns.resolver.method', this.handle, 'cancel');
+  }
+
+  getServers(): string[] {
+    return kernelCallSync('dns.resolver.method', this.handle, 'getServers');
+  }
+
+  setServers(servers: readonly string[]): void {
+    kernelCallSync('dns.resolver.method', this.handle, 'setServers', servers);
+  }
+
+  setLocalAddress(ipv4?: string, ipv6?: string): void {
+    kernelCallSync('dns.resolver.method', this.handle, 'setLocalAddress', ipv4, ipv6);
+  }
+
+  query(method: string, ...args: any[]): Promise<any> {
+    return kernelCall('dns.resolver.query', this.handle, method, ...args);
+  }
+}
+
+type ResolverMethod = (hostname: string, options: any, done?: Callback) => void;
+
+export interface Resolver extends Record<(typeof resolverMethods)[number], ResolverMethod> {}
+export class Resolver extends ResolverState {
+  constructor(options?: any) {
+    super(options);
+  }
+}
+
+for (const method of resolverMethods)
+  Object.defineProperty(Resolver.prototype, method, {
+    configurable: true,
+    value(this: ResolverState, hostname: string, options: any, done?: Callback) {
+      if (typeof options === 'function') [done, options] = [options, undefined];
+      if (typeof done !== 'function')
+        throw new TypeError('The callback argument must be a function');
+      const args = options === undefined ? [hostname] : [hostname, options];
+      callback(this.query(method, ...args), done);
+    },
+  });
+
+type PromiseResolverMethod = (hostname: string, options?: any) => Promise<any>;
+
+export interface PromiseResolver extends Record<
+  (typeof resolverMethods)[number],
+  PromiseResolverMethod
+> {}
+export class PromiseResolver extends ResolverState {
+  constructor(options?: any) {
+    super(options);
+  }
+}
+
+for (const method of resolverMethods)
+  Object.defineProperty(PromiseResolver.prototype, method, {
+    configurable: true,
+    value(this: ResolverState, ...args: any[]) {
+      return this.query(method, ...args);
+    },
+  });
+
 export const promises = {
+  Resolver: PromiseResolver,
   getDefaultResultOrder,
   getServers,
   lookup: promise('lookup'),
@@ -78,6 +168,7 @@ export const promises = {
   resolvePtr: promise('resolvePtr'),
   resolveSoa: promise('resolveSoa'),
   resolveSrv: promise('resolveSrv'),
+  resolveTlsa: promise('resolveTlsa'),
   resolveTxt: promise('resolveTxt'),
   reverse: promise('reverse'),
   setDefaultResultOrder,
@@ -92,6 +183,7 @@ const runtime = {
   ADDRCONFIG,
   ALL,
   V4MAPPED,
+  Resolver,
   getDefaultResultOrder,
   getServers,
   lookup,
@@ -109,6 +201,7 @@ const runtime = {
   resolvePtr,
   resolveSoa,
   resolveSrv,
+  resolveTlsa,
   resolveTxt,
   reverse,
   setDefaultResultOrder,

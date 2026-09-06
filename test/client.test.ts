@@ -326,10 +326,14 @@ test('client contract through real HTTP, binary WebSocket and an isolated native
     assert.deepEqual(Buffer.concat(pipeOutput), Buffer.from([3, 2, 1]));
     const address = await browserDNS.promises.lookup('localhost');
     assert.ok(address.family === 4 || address.family === 6);
+    const resolver = new browserDNS.promises.Resolver();
+    const resolverServers = resolver.getServers();
+    resolver.setServers(resolverServers);
+    assert.deepEqual(resolver.getServers(), resolverServers);
     assert.equal(
       XMLHttpRequest.requests,
-      beforeChild + 3,
-      'each spawn crosses synchronously once; lifecycle and binary streams use the WebSocket',
+      beforeChild + 7,
+      'spawn and resolver state cross synchronously; lifecycle, queries, and binary streams use the WebSocket',
     );
     const beforeNetworkKernel = XMLHttpRequest.requests;
     const kernelServer = browserNet.createServer((socket: any) =>

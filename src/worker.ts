@@ -3,6 +3,7 @@ import { failure } from './protocol.js';
 import { decodeException, decodeValue, encodeException, encodeValue } from './values.js';
 import { FileKernel } from './kernel/files.js';
 import { NetworkKernel } from './kernel/network.js';
+import { DnsKernel } from './kernel/dns.js';
 import { SystemKernel } from './kernel/system.js';
 import { ChildProcessKernel } from './kernel/child-process.js';
 import { AddonKernel } from './kernel/addons.js';
@@ -67,6 +68,7 @@ const kernelEvent = (handle: number, event: string, ...args: any[]) =>
   send({ type: 'kernel-event', handle, event, value: encodeValue(args) });
 
 const files = new FileKernel(kernelEvent, allocateHandle);
+const dns = new DnsKernel(allocateHandle);
 const network = new NetworkKernel(kernelEvent, allocateHandle, {
   sync: (id, args) => invokeCallback(id, undefined, args, true),
   async: invokeCallbackAsync,
@@ -88,6 +90,7 @@ const reject = (id: number, error: unknown) =>
 
 async function close(): Promise<void> {
   await Promise.all([files.close(), network.close(), children.close()]);
+  dns.close();
   addons.close();
   sqlite.close();
   process.exit(0);
@@ -114,19 +117,20 @@ function handle(message: any): void {
     if (invocation.operation === 'kernel') {
       const kernel = operation.startsWith('fs.')
         ? files
-        : operation.startsWith('sqlite.')
-          ? sqlite
-          : operation.startsWith('addon.')
-            ? addons
-            : operation.startsWith('net.') ||
-                operation.startsWith('tls.') ||
-                operation.startsWith('dns.') ||
-                operation.startsWith('fetch.') ||
-                operation.startsWith('websocket.')
-              ? network
-              : operation.startsWith('child.')
-                ? children
-                : network;
+        : operation.startsWith('dns.')
+          ? dns
+          : operation.startsWith('sqlite.')
+            ? sqlite
+            : operation.startsWith('addon.')
+              ? addons
+              : operation.startsWith('net.') ||
+                  operation.startsWith('tls.') ||
+                  operation.startsWith('fetch.') ||
+                  operation.startsWith('websocket.')
+                ? network
+                : operation.startsWith('child.')
+                  ? children
+                  : network;
       void kernel.execute(operation, args).then(
         (value) => result(message.id, value),
         (error) => reject(message.id, error),
@@ -140,25 +144,25 @@ function handle(message: any): void {
       try {
         value = operation.startsWith('fs.')
           ? files.executeSync(operation, args)
-          : operation.startsWith('sqlite.')
-            ? sqlite.executeSync(operation, args)
-            : operation.startsWith('addon.')
-              ? addons.executeSync(operation, args)
-              : operation.startsWith('module.')
-                ? modules.executeSync(operation, args)
-                : operation === 'child.spawn'
-                  ? children.executeSync(operation, args)
-                  : operation.startsWith('tls.') ||
-                      operation.startsWith('net.') ||
-                      operation.startsWith('dns.')
-                    ? network.executeSync(operation, args)
-                    : operation.startsWith('os.') ||
-                        operation.startsWith('child.') ||
-                        operation.startsWith('system.')
-                      ? system.executeSync(operation, args)
-                      : (() => {
-                          throw new TypeError(`Unknown synchronous operation ${operation}`);
-                        })();
+          : operation.startsWith('dns.')
+            ? dns.executeSync(operation, args)
+            : operation.startsWith('sqlite.')
+              ? sqlite.executeSync(operation, args)
+              : operation.startsWith('addon.')
+                ? addons.executeSync(operation, args)
+                : operation.startsWith('module.')
+                  ? modules.executeSync(operation, args)
+                  : operation === 'child.spawn'
+                    ? children.executeSync(operation, args)
+                    : operation.startsWith('tls.') || operation.startsWith('net.')
+                      ? network.executeSync(operation, args)
+                      : operation.startsWith('os.') ||
+                          operation.startsWith('child.') ||
+                          operation.startsWith('system.')
+                        ? system.executeSync(operation, args)
+                        : (() => {
+                            throw new TypeError(`Unknown synchronous operation ${operation}`);
+                          })();
       } finally {
         context = previous;
       }

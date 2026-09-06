@@ -42,7 +42,8 @@ resuming work. Verify details against source and never store credentials or secr
   through MessagePack. Cycles are retained. Functions and behavioral objects are rejected by the
   value boundary and require an explicit capability contract.
 - Browser-owned runtime objects contain private, connection-owned handles for files, watchers,
-  child processes, TCP/Unix sockets, HTTP listeners, WebSockets, and native-addon resources.
+  child processes, TCP/Unix sockets, HTTP listeners, WebSockets, DNS resolvers, and native-addon
+  resources.
 - CommonJS `require.resolve()` stays synchronous and is anchored to the package source represented
   in the browser bundle. The engine performs only the filesystem/module-resolution decision and
   returns the resolved path. Packages that address runtime resources this way are retained in the
@@ -151,16 +152,20 @@ resuming work. Verify details against source and never store credentials or secr
   limits.
 - HTTP/2 interoperates in both directions with native Node peers. Its protocol machinery remains
   local, coalesces outgoing frames, rejects invalid settings, handles repeated identical ping
-  payloads, and closes requests queued before connection without leaving them pending.
+  payloads, closes requests queued before connection without leaving them pending, and preserves
+  native EOF delivery when a consumer pauses after the final data frame.
 - The compatibility suite contains 17 browser examples. All 17 passed in Vite production preview,
   and the `node:sqlite` case also passed in Vite development and standalone production launched from
   the repository root; the previous 16-case suite passed in both modes. The separate Playwright
   example launches Chromium, reads a page, and closes cleanly in Vite development and production
   preview. The esbuild example compiles TypeScript in the browser in development and standalone
   production; its executable package is inferred from `require.resolve()` and retained in the
-  deployment manifest. The root suite passed 82 tests; typecheck and both builds passed. Formatting passed after
-  applying Prettier and should be rechecked after subsequent edits. These counts describe the
-  current uncommitted worktree and must be updated when the suite changes.
+  deployment manifest. The React example runs an in-browser `@grpc/grpc-js` server and client in
+  development and production preview. Per-instance callback and Promise DNS resolvers retain their
+  native resolver state in the engine, while the resolver API stays local. The root suite passed 83
+  tests; typecheck and both builds passed. Formatting passed after applying Prettier and should be
+  rechecked after subsequent edits. These counts describe the current uncommitted worktree and
+  must be updated when the suite changes.
 - The published browser client has no raw `node:buffer` dependency, so importing it cannot produce
   Vite's browser-external stub even before the Lumiana plugin participates in resolution.
 - Optimized dependency output is keyed by a content fingerprint of Lumiana's installed Vite

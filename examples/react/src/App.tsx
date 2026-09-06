@@ -1,71 +1,120 @@
-import { useState } from "react";
-import { Hono } from "hono";
-import { serve } from "@hono/node-server";
+import { useState } from 'react';
+import * as grpc from '@grpc/grpc-js';
 
-const app = new Hono();
+type HelloRequest = {
+  name: string;
+};
 
-app.get("/", (c) => {
-  return c.json({
-    message: "Hello from Hono",
-    runtime: "Lumiana",
-    time: Date.now(),
-  });
-});
+type HelloResponse = {
+  message: string;
+};
 
-app.get("/users/:id", (c) => {
-  return c.json({
-    id: c.req.param("id"),
-    name: "Zohayr",
-  });
-});
+const serialize = (value: unknown) => Buffer.from(JSON.stringify(value));
 
-let server: ReturnType<typeof serve> | null = null;
+const deserialize = <T,>(buffer: Buffer): T => JSON.parse(buffer.toString());
+
+const service = {
+  sayHello: {
+    path: '/test.Greeter/SayHello',
+
+    requestStream: false,
+    responseStream: false,
+
+    requestSerialize: serialize,
+    requestDeserialize: (buffer: Buffer) => deserialize<HelloRequest>(buffer),
+
+    responseSerialize: serialize,
+    responseDeserialize: (buffer: Buffer) => deserialize<HelloResponse>(buffer),
+  },
+} satisfies grpc.ServiceDefinition;
+
+const Client = grpc.makeGenericClientConstructor(service, 'Greeter');
+
+let server: grpc.Server | null = null;
 
 export function App() {
-  const [status, setStatus] = useState("Stopped");
-  const [result, setResult] = useState("");
+  const [status, setStatus] = useState('Ready');
+  const [result, setResult] = useState('');
 
-  async function start() {
+  async function startServer() {
     if (server) {
-      setStatus("Already running");
+      setStatus('Server already running');
       return;
     }
 
-    server = serve({
-      fetch: app.fetch,
-      port: 3000,
+    server = new grpc.Server();
+
+    server.addService(service, {
+      sayHello(
+        call: grpc.ServerUnaryCall<HelloRequest, HelloResponse>,
+        callback: grpc.sendUnaryData<HelloResponse>,
+      ) {
+        callback(null, {
+          message: `Hello ${call.request.name} from gRPC`,
+        });
+      },
     });
 
-    setStatus("Running on http://localhost:3000");
+    await new Promise<void>((resolve, reject) => {
+      server!.bindAsync('127.0.0.1:50051', grpc.ServerCredentials.createInsecure(), (error) => {
+        if (error) {
+          reject(error);
+          return;
+        }
+
+        resolve();
+      });
+    });
+
+    setStatus('gRPC server running on :50051');
   }
 
-  async function test() {
-    setStatus("Requesting...");
+  async function callServer() {
+    setStatus('Calling gRPC...');
 
-    const response = await fetch("http://localhost:3000/users/123");
-    const data = await response.json();
+    const client = new Client('127.0.0.1:50051', grpc.credentials.createInsecure());
 
-    setResult(JSON.stringify(data, null, 2));
-    setStatus(`HTTP ${response.status}`);
+    const response = await new Promise<HelloResponse>((resolve, reject) => {
+      client.sayHello(
+        {
+          name: 'Example User',
+        },
+        (error: grpc.ServiceError | null, response: HelloResponse) => {
+          if (error) {
+            reject(error);
+            return;
+          }
+
+          resolve(response);
+        },
+      );
+    });
+
+    client.close();
+
+    setResult(JSON.stringify(response, null, 2));
+    setStatus('Done');
   }
 
-  function stop() {
+  function stopServer() {
     if (!server) return;
 
-    server.close();
+    server.forceShutdown();
     server = null;
 
-    setStatus("Stopped");
+    setStatus('Stopped');
   }
 
   return (
     <main style={{ padding: 24 }}>
-      <h1>Hono + React + Lumiana</h1>
+      <h1>gRPC + React + Lumiana</h1>
 
-      <div style={{ display: "flex", gap: 8 }}>
-        <button onClick={start}>Start Hono</button>
-        <button onClick={test}>Test request</button>
-        <button onClick={stop}>Stop</button>
+      <div style={{ display: 'flex', gap: 8 }}>
+        <button onClick={startServer}>Start gRPC</button>
+
+        <button onClick={callServer}>Call gRPC</button>
+
+        <button onClick={stopServer}>Stop</button>
       </div>
 
       <p>{status}</p>

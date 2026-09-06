@@ -1,6 +1,4 @@
 import net, { type Server, type Socket } from 'node:net';
-import dns from 'node:dns';
-import dnsPromises from 'node:dns/promises';
 import WebSocket from 'ws';
 import tls from 'node:tls';
 import { TlsContexts, tlsInfo } from './tls-contexts.js';
@@ -208,12 +206,6 @@ export class NetworkKernel {
       if (typeof target !== 'function') throw new TypeError(`Unknown net operation ${method}`);
       return Reflect.apply(target, net, args);
     }
-    if (operation.startsWith('dns.')) {
-      const method = operation.slice(4);
-      const target = (dns as any)[method];
-      if (typeof target !== 'function') throw new TypeError(`Unknown DNS operation ${method}`);
-      return Reflect.apply(target, dns, args);
-    }
     if (operation === 'net.server' || operation === 'tls.server')
       return this.createServer(operation, args);
     if (operation === 'tls.serverMethod') {
@@ -242,12 +234,6 @@ export class NetworkKernel {
   }
 
   async execute(operation: string, args: any[]): Promise<any> {
-    if (operation.startsWith('dns.')) {
-      const method = operation.slice(4);
-      const target = (dnsPromises as any)[method];
-      if (typeof target !== 'function') throw new TypeError(`Unknown DNS operation ${method}`);
-      return Reflect.apply(target, dnsPromises, args);
-    }
     switch (operation) {
       case 'fetch.request': {
         const [token, url, input = {}] = args;

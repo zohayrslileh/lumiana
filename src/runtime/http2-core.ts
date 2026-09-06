@@ -127,6 +127,11 @@ export function createHttp2(
       if (!this.remoteEnded) {
         this.remoteEnded = true;
         this.push(null);
+        // Native ClientHttp2Stream reports `end` after the last delivered data
+        // frame even when a data listener paused the stream. Reading zero bytes
+        // advances the Readable EOF state without consuming buffered data or
+        // changing the caller's paused/flowing state.
+        this.read(0);
       }
     }
     respond(headers: any = {}, options: any = {}) {

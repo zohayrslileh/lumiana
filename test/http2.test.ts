@@ -222,6 +222,41 @@ test(
   },
 );
 
+test(
+  'HTTP/2 reports end after the final delivered frame while the client stream is paused',
+  { timeout: 5000 },
+  async () => {
+    const server = http2.createServer();
+    server.on('stream', (stream) => {
+      stream.respond({ ':status': 200 }, { waitForTrailers: true });
+      stream.on('wantTrailers', () => stream.sendTrailers({ 'x-status': 'complete' }));
+      stream.end('result');
+    });
+    server.listen(0, '127.0.0.1');
+    await once(server, 'listening');
+    const session = local.connect(`http://127.0.0.1:${(server.address() as any).port}`);
+    try {
+      const stream = session.request();
+      const data = new Promise<Buffer>((resolve) =>
+        stream.once('data', (chunk: Buffer) => {
+          stream.pause();
+          resolve(Buffer.from(chunk));
+        }),
+      );
+      const trailers = once(stream, 'trailers');
+      const ended = once(stream, 'end');
+      stream.end();
+      assert.equal((await data).toString(), 'result');
+      assert.equal((await trailers)[0]['x-status'], 'complete');
+      await ended;
+      assert.equal(stream.isPaused(), true);
+    } finally {
+      session.destroy();
+      await closeServer(server);
+    }
+  },
+);
+
 test('HTTP/2 rejects invalid boolean settings before coercion', () => {
   const bytes = Buffer.from([0, 2, 0, 0, 0, 2]);
   assert.throws(() => getUnpackedSettings(bytes, { validate: true }), RangeError);
