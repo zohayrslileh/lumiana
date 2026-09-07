@@ -1,5 +1,5 @@
 import { STATUS_CODES } from './http-status.js';
-import stream from 'stream-browserify';
+import stream from './stream.js';
 import { EventEmitter } from 'events';
 import { Buffer } from 'buffer';
 import { HTTPParser } from 'http-parser-js';

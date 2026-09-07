@@ -1,63 +1,133 @@
 import { useState } from 'react';
-import puppeteer from 'puppeteer';
-
-type TestResult = {
-  title: string;
-  heading: string | null;
-  pid: number | undefined;
-  screenshot: string;
-};
+import { createServer } from 'node:http';
+import {
+  request,
+  Pool,
+} from 'undici';
 
 export function App() {
   const [running, setRunning] = useState(false);
-  const [result, setResult] = useState<TestResult | null>(null);
-  const [error, setError] = useState<string | null>(null);
+  const [result, setResult] = useState('');
 
-  async function testPuppeteer() {
+  async function runTest() {
     setRunning(true);
-    setError(null);
-    setResult(null);
+    setResult('');
 
-    let browser;
+    const server = createServer((req, res) => {
+      if (req.url === '/json') {
+        res.setHeader('content-type', 'application/json');
+
+        res.end(
+          JSON.stringify({
+            ok: true,
+            source: 'Lumiana',
+          })
+        );
+
+        return;
+      }
+
+      if (req.url === '/stream') {
+        res.write('one\n');
+
+        setTimeout(() => {
+          res.write('two\n');
+        }, 50);
+
+        setTimeout(() => {
+          res.end('three\n');
+        }, 100);
+
+        return;
+      }
+
+      res.statusCode = 404;
+      res.end('Not found');
+    });
+
+    let pool: Pool | undefined;
 
     try {
-      browser = await puppeteer.launch({
-        headless: true,
+      await new Promise<void>((resolve, reject) => {
+        server.once('error', reject);
+
+        server.listen(0, '127.0.0.1', () => {
+          resolve();
+        });
       });
 
-      const page = await browser.newPage();
+      const address = server.address();
 
-      await page.goto('https://example.com', {
-        waitUntil: 'networkidle0',
-      });
+      if (!address || typeof address === 'string') {
+        throw new Error('Could not determine port');
+      }
 
-      const title = await page.title();
+      const origin =
+        `http://127.0.0.1:${address.port}`;
 
-      const heading = await page.$eval(
-        'h1',
-        (el) => el.textContent,
+      // Basic request
+      const response = await request(
+        `${origin}/json`
       );
 
-      const screenshot = await page.screenshot({
-        encoding: 'base64',
+      const json = await response.body.json();
+
+      // Connection pool
+      pool = new Pool(origin, {
+        connections: 2,
+        pipelining: 2,
       });
 
-      setResult({
-        title,
-        heading,
-        pid: browser.process()?.pid,
-        screenshot: `data:image/png;base64,${screenshot}`,
+      const requests = await Promise.all(
+        Array.from({ length: 10 }, async (_, i) => {
+          const response = await pool!.request({
+            path: '/json',
+            method: 'GET',
+            headers: {
+              'x-request-id': String(i),
+            },
+          });
+
+          return response.body.json();
+        })
+      );
+
+      // Streaming body
+      const streamResponse = await pool.request({
+        path: '/stream',
+        method: 'GET',
       });
+
+      let streamed = '';
+
+      for await (const chunk of streamResponse.body) {
+        streamed += chunk.toString();
+      }
+
+      setResult(
+        JSON.stringify(
+          {
+            basicRequest: json,
+            pooledRequests: requests.length,
+            stream: streamed,
+          },
+          null,
+          2
+        )
+      );
     } catch (error: unknown) {
-      console.error(error);
-
-      setError(
+      setResult(
         error instanceof Error
           ? error.stack ?? error.message
-          : String(error),
+          : String(error)
       );
     } finally {
-      await browser?.close();
+      await pool?.close();
+
+      await new Promise<void>(resolve => {
+        server.close(() => resolve());
+      });
+
       setRunning(false);
     }
   }
@@ -71,66 +141,23 @@ export function App() {
         fontFamily: 'system-ui',
       }}
     >
-      <h1>Puppeteer × Lumiana</h1>
-
-      <p>
-        Chromium is launched through Puppeteer while this React UI
-        continues running in the browser.
-      </p>
+      <h1>Undici × Lumiana</h1>
 
       <button
-        onClick={testPuppeteer}
+        onClick={runTest}
         disabled={running}
-        style={{
-          padding: '10px 16px',
-          fontSize: 16,
-          cursor: running ? 'wait' : 'pointer',
-        }}
       >
-        {running ? 'Running…' : 'Run Puppeteer'}
+        {running ? 'Running…' : 'Run Undici test'}
       </button>
 
-      {error && (
-        <pre
-          style={{
-            marginTop: 24,
-            padding: 16,
-            overflow: 'auto',
-            background: '#181818',
-            color: '#ff8c8c',
-          }}
-        >
-          {error}
-        </pre>
-      )}
-
-      {result && (
-        <section style={{ marginTop: 32 }}>
-          <p>
-            <strong>Chromium PID:</strong>{' '}
-            {result.pid ?? 'unknown'}
-          </p>
-
-          <p>
-            <strong>Title:</strong> {result.title}
-          </p>
-
-          <p>
-            <strong>H1:</strong> {result.heading}
-          </p>
-
-          <img
-            src={result.screenshot}
-            alt="Puppeteer screenshot"
-            style={{
-              display: 'block',
-              width: '100%',
-              marginTop: 20,
-              border: '1px solid #ccc',
-            }}
-          />
-        </section>
-      )}
+      <pre
+        style={{
+          marginTop: 24,
+          whiteSpace: 'pre-wrap',
+        }}
+      >
+        {result}
+      </pre>
     </main>
   );
 }

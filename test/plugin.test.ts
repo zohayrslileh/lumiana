@@ -194,6 +194,14 @@ test('Vite keeps package JavaScript local and deploys only detected native addon
     await pkg('native-wrapper', {
       'index.js': "module.exports=require('@native/platform/binding.node');",
     });
+    await pkg(
+      'direct-native',
+      { 'binding.node': 'direct package binary' },
+      { main: 'binding.node' },
+    );
+    await pkg('direct-native-wrapper', {
+      'index.js': "module.exports=require('direct-native');",
+    });
     await pkg('explicit', { 'index.js': "export default 'explicit-proof';" }, { type: 'module' });
     await pkg(
       'task-package',
@@ -210,7 +218,7 @@ test('Vite keeps package JavaScript local and deploys only detected native addon
     );
     await fs.writeFile(
       path.join(root, 'entry.js'),
-      "import {value,tmpdir} from 'portable';import cjs from 'browser-cjs';import {bufferProof} from 'portable-buffer';import inheritance from 'portable-inheritance';import environment from 'node-environment-library';import {filesystemProof} from 'filesystem-library';import {socketProof} from 'socket-library';import condition from 'conditional';import {WebSocketServer} from 'conditional-server';import adapter from 'node-adapter';import addon from 'native-addon';import computedAddon from 'computed-native-addon';import wrappedAddon from 'native-wrapper';import explicit from 'explicit';export * from 'node:os';const server=new WebSocketServer();document.body.textContent=[value,tmpdir(),cjs(),bufferProof,inheritance(),environment(),filesystemProof,socketProof,condition,server.kind,adapter,addon,computedAddon,wrappedAddon,explicit].join(',');",
+      "import {value,tmpdir} from 'portable';import cjs from 'browser-cjs';import {bufferProof} from 'portable-buffer';import inheritance from 'portable-inheritance';import environment from 'node-environment-library';import {filesystemProof} from 'filesystem-library';import {socketProof} from 'socket-library';import condition from 'conditional';import {WebSocketServer} from 'conditional-server';import adapter from 'node-adapter';import addon from 'native-addon';import computedAddon from 'computed-native-addon';import wrappedAddon from 'native-wrapper';import directAddon from 'direct-native-wrapper';import explicit from 'explicit';export * from 'node:os';const server=new WebSocketServer();document.body.textContent=[value,tmpdir(),cjs(),bufferProof,inheritance(),environment(),filesystemProof,socketProof,condition,server.kind,adapter,addon,computedAddon,wrappedAddon,directAddon,explicit].join(',');",
     );
     await build({
       root,
@@ -252,13 +260,15 @@ test('Vite keeps package JavaScript local and deploys only detected native addon
       'binary native-proof',
       'computed binary native-proof',
       'transitive platform binary',
+      'direct package binary',
     ])
       assert.ok(!output.includes(text), text);
     const manifest = JSON.parse(await fs.readFile(path.join(root, 'dist/package.json'), 'utf8'));
     assert.equal(manifest.dependencies['native-addon'], '1.0.0');
     assert.equal(manifest.dependencies['computed-native-addon'], '1.0.0');
-    assert.equal(manifest.dependencies['native-wrapper'], '1.0.0');
-    assert.equal(manifest.dependencies['@native/platform'], undefined);
+    assert.equal(manifest.dependencies['native-wrapper'], undefined);
+    assert.equal(manifest.dependencies['direct-native-wrapper'], '1.0.0');
+    assert.equal(manifest.dependencies['@native/platform'], '1.0.0');
     assert.equal(manifest.dependencies.explicit, undefined);
     assert.equal(manifest.dependencies['conditional-server'], undefined);
     assert.equal(manifest.dependencies.portable, undefined);

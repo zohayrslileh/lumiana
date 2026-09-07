@@ -1,5 +1,5 @@
 import { Buffer } from 'buffer';
-import stream from 'stream-browserify';
+import stream from './stream.js';
 import promises from './fs-promises.js';
 import { constants } from './fs-constants.js';
 import {

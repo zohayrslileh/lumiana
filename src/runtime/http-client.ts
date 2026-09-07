@@ -1,4 +1,4 @@
-import stream from 'stream-browserify';
+import stream from './stream.js';
 import { Buffer } from 'buffer';
 import { HTTPParser } from 'http-parser-js';
 import { createNetwork, type KernelSubscribe } from './network.js';

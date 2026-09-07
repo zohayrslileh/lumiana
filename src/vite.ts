@@ -48,13 +48,12 @@ const addonPrefix = '\0lumiana:addon:';
 const commonJSBuiltinPrefix = '\0lumiana:commonjs-builtin:';
 const localBuiltins: Record<string, string> = Object.assign(Object.create(null), {
   events: 'events/',
-  buffer: 'buffer/',
   assert: 'assert/',
   querystring: 'querystring-es3',
-  stream: 'stream-browserify',
   string_decoder: 'string_decoder/',
 });
 const runtimeBuiltins: Record<string, string> = Object.assign(Object.create(null), {
+  buffer: 'runtime/buffer.js',
   path: 'runtime/path.js',
   'assert/strict': 'runtime/assert-strict.js',
   async_hooks: 'runtime/async-hooks.js',
@@ -75,6 +74,7 @@ const runtimeBuiltins: Record<string, string> = Object.assign(Object.create(null
   readline: 'runtime/readline.js',
   'readline/promises': 'runtime/readline.js',
   sqlite: 'runtime/sqlite.js',
+  stream: 'runtime/stream.js',
   'stream/promises': 'runtime/stream-promises.js',
   timers: 'runtime/timers.js',
   tls: 'runtime/tls.js',
@@ -109,6 +109,17 @@ export function lumiana(options: LumianaPluginOptions = {}): Plugin {
     implementationFiles.add(file.split('?')[0]!);
     return file;
   };
+  const tryResolve = async (
+    resolver: ReturnType<ResolvedConfig['createResolver']>,
+    id: string,
+    importer?: string,
+  ) => {
+    try {
+      return await resolver(id, importer);
+    } catch {
+      return undefined;
+    }
+  };
   const serveDependency = (file: string) => {
     const optimizer = devServer?.environments?.client?.depsOptimizer ?? devServer?._depsOptimizer;
     if (optimizer && file.includes('/node_modules/') && !file.startsWith('\0'))
@@ -141,6 +152,11 @@ export function lumiana(options: LumianaPluginOptions = {}): Plugin {
       : undefined;
   const addonId = (specifier: string, importer?: string) =>
     addonPrefix + JSON.stringify({ specifier, origin: sourceOrigin(importer) });
+  const resolvedAddonId = (resolved: string | undefined, importer?: string) => {
+    if (!resolved || resolved.startsWith('__vite-optional-peer-dep:')) return;
+    const file = resolved.split('?')[0]!;
+    if (file.endsWith('.node')) return addonId(addons.addon(file, importer), importer);
+  };
   const addonTarget = (id: string): { specifier: string; origin?: string } =>
     JSON.parse(id.slice(addonPrefix.length));
   const commonJSBuiltinId = (file: string) => commonJSBuiltinPrefix + JSON.stringify(file);
@@ -148,6 +164,8 @@ export function lumiana(options: LumianaPluginOptions = {}): Plugin {
     JSON.parse(id.slice(commonJSBuiltinPrefix.length));
   const commonJSBuiltinSource = (file: string) =>
     `import value from ${JSON.stringify(file)};module.exports=value;`;
+  const nativeAddonSource = (target: { specifier: string; origin?: string }) =>
+    `import {nativeAddon} from ${JSON.stringify(runtimeSpecifier)};module.exports=nativeAddon(${JSON.stringify(target.specifier)},${JSON.stringify(target.origin)});`;
   const skip = (id: string) =>
     id.startsWith(runtimeDir + '/') ||
     id.startsWith('\0') ||
@@ -270,7 +288,7 @@ export function lumiana(options: LumianaPluginOptions = {}): Plugin {
                           : importer
                             ? path.resolve(path.dirname(importer), id)
                             : undefined;
-                        if (file) return addonId(addons.addon(file, importer), importer);
+                        if (file) return resolvedAddonId(file, importer);
                       }
                       if (id === runtimeSpecifier) return path.join(runtimeDir, 'browser.js');
                       const runtime = runtimeBuiltins[builtinName(id)];
@@ -285,16 +303,16 @@ export function lumiana(options: LumianaPluginOptions = {}): Plugin {
                         importer,
                         options?.kind === 'require-call',
                       );
+                      const resolved = await tryResolve(resolver, id, importer);
+                      const addon = resolvedAddonId(resolved, importer);
+                      if (addon) return addon;
                       if (implementation(importer)) {
-                        const resolved = await resolver(id, importer);
                         if (resolved && !resolved.startsWith('__vite-optional-peer-dep:'))
                           return implementationDependency(resolved);
                       }
                       if (resolver === resolveNode || resolver === requireNode) {
-                        const resolved = await resolver(id, importer);
-                        if (resolved && !resolved.startsWith('__vite-optional-peer-dep:')) {
+                        if (resolved && !resolved.startsWith('__vite-optional-peer-dep:'))
                           return nodeContract(resolved);
-                        }
                       }
                     },
                     load(id: string) {
@@ -304,11 +322,13 @@ export function lumiana(options: LumianaPluginOptions = {}): Plugin {
                         return commonJSBuiltinSource(commonJSBuiltinTarget(id));
                       if (id.startsWith(addonPrefix)) {
                         const target = addonTarget(id);
-                        return `import {nativeAddon} from ${JSON.stringify(runtimeSpecifier)};export default nativeAddon(${JSON.stringify(target.specifier)},${JSON.stringify(target.origin)});`;
+                        return nativeAddonSource(target);
                       }
                     },
                     async transform(this: any, code: string, id: string) {
                       if (skip(id)) return null;
+                      const nodeGlobals = !dependencyModule(id) || (await usesNodeEnvironment(id));
+                      if (nodeGlobals) await addons.detect(id.split('?')[0]!);
                       return transformSource(code, id, {
                         place: (specifier, required, kind) =>
                           placeModule(
@@ -326,7 +346,7 @@ export function lumiana(options: LumianaPluginOptions = {}): Plugin {
                         retainPackage: () => addons.retain(id.split('?')[0]!),
                         retainDependency: (request) =>
                           addons.retainRequest(request, id.split('?')[0]!),
-                        nodeGlobals: !dependencyModule(id) || (await usesNodeEnvironment(id)),
+                        nodeGlobals,
                       });
                     },
                   },
@@ -359,15 +379,24 @@ export function lumiana(options: LumianaPluginOptions = {}): Plugin {
                           args.importer || undefined,
                           args.kind === 'require-call',
                         );
+                        const resolved = await tryResolve(
+                          resolver,
+                          args.path,
+                          args.importer || undefined,
+                        );
+                        const addon = resolvedAddonId(resolved, args.importer || undefined);
+                        if (addon)
+                          return {
+                            path: addon.slice(addonPrefix.length),
+                            namespace: 'lumiana-addon',
+                          };
                         if (implementation(args.importer)) {
-                          const resolved = await resolver(args.path, args.importer);
                           if (resolved?.startsWith('__vite-browser-external'))
                             return { path: resolved, namespace: 'lumiana-empty' };
                           if (resolved && !resolved.startsWith('__vite-optional-peer-dep:'))
                             return { path: implementationDependency(resolved) };
                         }
                         if (resolver === resolveNode || resolver === requireNode) {
-                          const resolved = await resolver(args.path, args.importer || undefined);
                           if (resolved && !resolved.startsWith('__vite-optional-peer-dep:'))
                             return { path: nodeContract(resolved) };
                         }
@@ -388,23 +417,24 @@ export function lumiana(options: LumianaPluginOptions = {}): Plugin {
                         const file = path.isAbsolute(args.path)
                           ? args.path
                           : path.resolve(args.resolveDir, args.path);
+                        const addon = resolvedAddonId(file, args.importer || file)!;
                         return {
-                          path: JSON.stringify({
-                            specifier: addons.addon(file, args.importer || file),
-                            origin: sourceOrigin(args.importer),
-                          }),
+                          path: addon.slice(addonPrefix.length),
                           namespace: 'lumiana-addon',
                         };
                       });
                       build.onLoad({ filter: /.*/, namespace: 'lumiana-addon' }, (args) => {
                         const target = JSON.parse(args.path);
                         return {
-                          contents: `import {nativeAddon} from ${JSON.stringify(runtimeSpecifier)};export default nativeAddon(${JSON.stringify(target.specifier)},${JSON.stringify(target.origin)});`,
+                          contents: nativeAddonSource(target),
                           loader: 'js',
                         };
                       });
                       build.onLoad({ filter: /\.[cm]?[jt]sx?$/ }, async (args) => {
                         if (skip(args.path)) return;
+                        const nodeGlobals =
+                          !dependencyModule(args.path) || (await usesNodeEnvironment(args.path));
+                        if (nodeGlobals) await addons.detect(args.path);
                         const code = await fs.readFile(args.path, 'utf8');
                         const transformed = await transformSource(code, args.path, {
                           place: (specifier, required, kind) =>
@@ -425,8 +455,7 @@ export function lumiana(options: LumianaPluginOptions = {}): Plugin {
                             addons.locate(request, args.path, computed),
                           retainPackage: () => addons.retain(args.path),
                           retainDependency: (request) => addons.retainRequest(request, args.path),
-                          nodeGlobals:
-                            !dependencyModule(args.path) || (await usesNodeEnvironment(args.path)),
+                          nodeGlobals,
                         });
                         if (!transformed) return;
                         const ext = path.extname(args.path).slice(1);
@@ -501,7 +530,7 @@ export function lumiana(options: LumianaPluginOptions = {}): Plugin {
         const resolved = path.isAbsolute(id)
           ? id
           : (await this.resolve(id, importer, { ...resolveOptions, skipSelf: true }))?.id;
-        if (resolved) return addonId(addons.addon(resolved.split('?')[0]!, importer), importer);
+        if (resolved) return resolvedAddonId(resolved, importer);
       }
       if (id === 'lumiana/client') return clientId;
       if (id === runtimeSpecifier) return runtimeId;
@@ -516,23 +545,26 @@ export function lumiana(options: LumianaPluginOptions = {}): Plugin {
       if (id === runtimeId) return id;
       if (nodeFiles.has(id.split('?')[0]!) && !(resolveOptions as { scan?: boolean }).scan)
         return serveDependency(id);
+      const required = (resolveOptions as any).kind === 'require-call';
+      const browserResolved = importer
+        ? await tryResolve(required ? requireBrowser : resolveBrowser, id, importer)
+        : undefined;
+      const browserAddon = resolvedAddonId(browserResolved, importer);
+      if (browserAddon) return browserAddon;
       if (implementation(importer)) {
-        const resolved = await (
-          (resolveOptions as any).kind === 'require-call' ? requireBrowser : resolveBrowser
-        )(id, importer);
-        if (resolved && !resolved.startsWith('__vite-optional-peer-dep:'))
-          return serveDependency(implementationDependency(resolved));
+        if (browserResolved && !browserResolved.startsWith('__vite-optional-peer-dep:'))
+          return serveDependency(implementationDependency(browserResolved));
       }
       if (importer && (await usesNodeEnvironment(importer))) {
-        const required = (resolveOptions as any).kind === 'require-call';
-        const resolved = await (required ? requireNode : resolveNode)(id, importer);
+        const resolved = await tryResolve(required ? requireNode : resolveNode, id, importer);
         if (resolved) {
+          const addon = resolvedAddonId(resolved, importer);
+          if (addon) return addon;
           nodeContract(resolved);
           // Raw resolution establishes the execution environment. When both
           // environments select the same file, Vite still owns serving it,
           // including dependency optimization and CommonJS interoperability.
-          if (resolved !== (await (required ? requireBrowser : resolveBrowser)(id, importer)))
-            return serveDependency(resolved);
+          if (resolved !== browserResolved) return serveDependency(resolved);
         }
       }
     },
@@ -547,11 +579,13 @@ export function lumiana(options: LumianaPluginOptions = {}): Plugin {
         return `export * from ${JSON.stringify(path.join(runtimeDir, 'browser.js'))};`;
       if (id.startsWith(addonPrefix)) {
         const target = addonTarget(id);
-        return `import {nativeAddon} from ${JSON.stringify(runtimeSpecifier)};export default nativeAddon(${JSON.stringify(target.specifier)},${JSON.stringify(target.origin)});`;
+        return nativeAddonSource(target);
       }
     },
     async transform(code, id, transformOptions) {
       if (transformOptions?.ssr || skip(id)) return;
+      const nodeGlobals = !dependencyModule(id) || (await usesNodeEnvironment(id));
+      if (nodeGlobals) await addons.detect(id.split('?')[0]!);
       return transformSource(code, id, {
         origin: path.relative(config.root, id.split('?')[0]!),
         sourceURL: pathToFileURL(id.split('?')[0]!).href,
@@ -559,7 +593,7 @@ export function lumiana(options: LumianaPluginOptions = {}): Plugin {
         locateAddon: (request, computed) => addons.locate(request, id.split('?')[0]!, computed),
         retainPackage: () => addons.retain(id.split('?')[0]!),
         retainDependency: (request) => addons.retainRequest(request, id.split('?')[0]!),
-        nodeGlobals: !dependencyModule(id) || (await usesNodeEnvironment(id)),
+        nodeGlobals,
         place: (specifier, required, kind) =>
           placeModule(
             specifier,

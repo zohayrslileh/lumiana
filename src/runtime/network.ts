@@ -1,4 +1,4 @@
-import stream from 'stream-browserify';
+import stream from './stream.js';
 import { EventEmitter } from 'events';
 import { Buffer } from 'buffer';
 import type { KernelCall } from './filesystem.js';
@@ -35,8 +35,34 @@ export const socketOptions = (args: any[]) => {
   return { port: args[0], ...(typeof args[1] === 'string' ? { host: args[1] } : {}) };
 };
 
+const selectedOptions = (source: any, keys: readonly string[]) =>
+  Object.fromEntries(
+    keys.filter((key) => source?.[key] !== undefined).map((key) => [key, source[key]]),
+  );
+
+const serverOptions = (options: any) =>
+  selectedOptions(options, [
+    'allowHalfOpen',
+    'pauseOnConnect',
+    'noDelay',
+    'keepAlive',
+    'keepAliveInitialDelay',
+    'highWaterMark',
+  ]);
+
 const listenOptions = (args: any[]) => {
-  if (typeof args[0] === 'object') return { ...args[0] };
+  if (args[0] && typeof args[0] === 'object')
+    return selectedOptions(args[0], [
+      'port',
+      'host',
+      'path',
+      'backlog',
+      'exclusive',
+      'ipv6Only',
+      'reusePort',
+      'readableAll',
+      'writableAll',
+    ]);
   if (typeof args[0] === 'string') return { path: args[0] };
   return {
     port: args[0],
@@ -321,7 +347,12 @@ export function createNetwork(
         this.release = subscribe(handle, (event, args) => this.incoming(event, args));
         this.emit('handle');
       };
-      const input = typeof options === 'object' ? options : undefined;
+      const input =
+        options && typeof options === 'object'
+          ? transport.operation === 'net.server'
+            ? serverOptions(options)
+            : options
+          : undefined;
       if (sync && transport.operation === 'tls.server') attach(sync(transport.operation, input));
       else
         void call(transport.operation, input).then(attach, (reason) => this.emit('error', reason));

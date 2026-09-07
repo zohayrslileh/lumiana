@@ -1,5 +1,5 @@
-import { Buffer } from 'buffer';
-export { Buffer } from 'buffer';
+import { Buffer } from './runtime/buffer.js';
+export { Buffer } from './runtime/buffer.js';
 import {
   dispatchKernel,
   installKernel,
@@ -14,8 +14,12 @@ import { installGlobals } from './runtime/globals.js';
 import { clearOS, initializeOS } from './runtime/os.js';
 import { initializePerformance } from './runtime/perf-hooks.js';
 import {
+  clearInterval as localClearInterval,
   clearImmediate as localClearImmediate,
+  clearTimeout as localClearTimeout,
+  setInterval as localSetInterval,
   setImmediate as localSetImmediate,
+  setTimeout as localSetTimeout,
 } from './runtime/timers.js';
 import { PREFIX, encodePacket, decodePacket, restoreError, type Invocation } from './protocol.js';
 import { decodeException, decodeValue, encodeException, encodeValue } from './values.js';
@@ -97,6 +101,7 @@ interface Connection {
   addons: {
     values: Map<number, any>;
     handles: Map<any, number>;
+    modules: Map<string, any>;
   };
   runs: Map<number, RemoteIterator<any, any>>;
   workerSubscriptions: Map<number, { identity: string; iterator: RemoteIterator<any, any> }>;
@@ -497,6 +502,7 @@ function close(c: Connection, error = new Error('Lumiana is disconnected')): voi
   c.workerInstances.clear();
   c.sharedWorkerOpenings.clear();
   c.addons.values.clear();
+  c.addons.modules.clear();
   c.callbacks.clear();
 }
 function project(c: Connection, packet: any): void {
@@ -636,6 +642,7 @@ export const connect = {
         addons: {
           values: new Map(),
           handles: new Map(),
+          modules: new Map(),
         },
         runs: new Map(),
         workerSubscriptions: new Map(),
@@ -819,15 +826,31 @@ function materializeAddon(c: Connection, descriptor: any): any {
   if (descriptor.type === 'function') {
     const perform = (receiver: any, args: any[], construct: boolean) => {
       const receiverHandle = c.addons.handles.get(receiver);
-      return materializeAddon(
+      const invocation = addonOperation(
         c,
-        addonOperation(
-          c,
-          construct ? 'addon.construct' : 'addon.apply',
-          descriptor.handle,
-          ...(construct ? [args] : [receiverHandle, args]),
-        ),
+        construct ? 'addon.construct' : 'addon.apply',
+        descriptor.handle,
+        ...(construct ? [args] : [receiverHandle, args]),
       );
+      for (let index = 0; index < args.length; index++) {
+        const target = args[index];
+        const source = invocation.arguments[index];
+        if (
+          !(target instanceof ArrayBuffer || ArrayBuffer.isView(target)) ||
+          !(source instanceof ArrayBuffer || ArrayBuffer.isView(source))
+        )
+          continue;
+        const targetBytes =
+          target instanceof ArrayBuffer
+            ? new Uint8Array(target)
+            : new Uint8Array(target.buffer, target.byteOffset, target.byteLength);
+        const sourceBytes =
+          source instanceof ArrayBuffer
+            ? new Uint8Array(source)
+            : new Uint8Array(source.buffer, source.byteOffset, source.byteLength);
+        targetBytes.set(sourceBytes.subarray(0, targetBytes.byteLength));
+      }
+      return materializeAddon(c, invocation.result);
     };
     if (descriptor.constructible)
       value = function (this: any, ...args: any[]) {
@@ -858,16 +881,17 @@ function materializeAddon(c: Connection, descriptor: any): any {
     Object.defineProperty(value, property.key, {
       configurable: true,
       enumerable: property.enumerable,
-      get: () =>
-        property.value === undefined
-          ? property.kind === 'data' || property.get
-            ? materializeAddon(c, addonOperation(c, 'addon.get', descriptor.handle, property.key))
-            : undefined
-          : current,
+      get(this: any) {
+        if (property.value !== undefined) return current;
+        if (property.kind !== 'data' && !property.get) return undefined;
+        const target = c.addons.handles.get(this) ?? descriptor.handle;
+        return materializeAddon(c, addonOperation(c, 'addon.get', target, property.key));
+      },
       ...(property.writable
         ? {
-            set: (next: any) => {
-              addonOperation(c, 'addon.set', descriptor.handle, property.key, next);
+            set(this: any, next: any) {
+              const target = c.addons.handles.get(this) ?? descriptor.handle;
+              addonOperation(c, 'addon.set', target, property.key, next);
               if (property.value !== undefined) current = next;
             },
           }
@@ -880,7 +904,24 @@ function materializeAddon(c: Connection, descriptor: any): any {
 /** @internal Materialize a native addon's API as local browser functions and objects. */
 export function nativeAddon(specifier: string, sourceOrigin?: string): any {
   const c = connection();
-  return materializeAddon(c, addonOperation(c, 'addon.load', specifier, sourceOrigin));
+  const key = JSON.stringify([specifier, sourceOrigin]);
+  if (c.addons.modules.has(key)) return c.addons.modules.get(key);
+  const value = materializeAddon(c, addonOperation(c, 'addon.load', specifier, sourceOrigin));
+  c.addons.modules.set(key, value);
+  return value;
+}
+
+/** @internal Materialize one native module export without transferring its namespace graph. */
+export function nativeExport(specifier: string, name: string, sourceOrigin?: string): any {
+  const c = connection();
+  const key = JSON.stringify([specifier, name, sourceOrigin]);
+  if (c.addons.modules.has(key)) return c.addons.modules.get(key);
+  const value = materializeAddon(
+    c,
+    addonOperation(c, 'addon.export', specifier, name, sourceOrigin),
+  );
+  c.addons.modules.set(key, value);
+  return value;
 }
 
 /** @internal Resolve a CommonJS request against its original source module. */
@@ -895,34 +936,29 @@ export function hybridFetch(input: RequestInfo | URL, init?: RequestInit): Promi
     location.href,
   );
   if (requestURL.origin === location.origin) return state.fetch(input, init);
-  // Request is a browser-owned native value. Extract its standardized request data
-  // before handing it to a different implementation of the Fetch contract.
-  if (input instanceof Request)
-    return (async () => {
-      const body = ['GET', 'HEAD'].includes(input.method)
-        ? undefined
-        : new Uint8Array(await input.arrayBuffer());
-      return remoteFetch(requestURL, {
-        method: input.method,
-        headers: Object.fromEntries(input.headers),
-        body,
-        redirect: input.redirect,
-        credentials: input.credentials,
-        cache: input.cache,
-        signal: input.signal,
-        ...init,
-      });
-    })();
-  return remoteFetch(requestURL, init);
+  return remoteFetch(requestURL, input, init);
 }
-function remoteFetch(url: URL, init?: RequestInit): Promise<Response> {
-  const options: any = { ...init };
-  if (init?.headers) options.headers = Object.fromEntries(new Headers(init.headers));
-  delete options.signal;
+async function remoteFetch(
+  url: URL,
+  input: RequestInfo | URL,
+  init?: RequestInit,
+): Promise<Response> {
+  // BodyInit values belong to the browser realm. Materialize the Fetch request here so
+  // FormData, Blob, URLSearchParams and streams become their standard headers and bytes.
+  const request = new Request(input, init);
+  const body = ['GET', 'HEAD'].includes(request.method)
+    ? undefined
+    : new Uint8Array(await request.arrayBuffer());
+  const options = {
+    method: request.method,
+    headers: Object.fromEntries(request.headers),
+    body,
+    redirect: request.redirect,
+  };
   const token = crypto.randomUUID();
   const abort = () => void kernelCall('fetch.abort', token).catch(() => {});
-  if (init?.signal?.aborted) return Promise.reject(init.signal.reason);
-  init?.signal?.addEventListener('abort', abort, { once: true });
+  if (request.signal.aborted) throw request.signal.reason;
+  request.signal.addEventListener('abort', abort, { once: true });
   return kernelCall('fetch.request', token, url.href, options)
     .then((result) => {
       const response = new Response(result.body, {
@@ -937,10 +973,10 @@ function remoteFetch(url: URL, init?: RequestInit): Promise<Response> {
       return response;
     })
     .catch((error) => {
-      if (init?.signal?.aborted) throw init.signal.reason;
+      if (request.signal.aborted) throw request.signal.reason;
       throw error;
     })
-    .finally(() => init?.signal?.removeEventListener('abort', abort));
+    .finally(() => request.signal.removeEventListener('abort', abort));
 }
 
 class BoundaryWebSocket extends EventTarget {
@@ -1080,20 +1116,29 @@ export const nodeGlobal = installGlobals(globalThis, {
   global: globalThis,
   process: processRuntime,
   Buffer,
+  clearInterval: localClearInterval,
   setImmediate: localSetImmediate,
   clearImmediate: localClearImmediate,
+  clearTimeout: localClearTimeout,
+  setInterval: localSetInterval,
+  setTimeout: localSetTimeout,
 });
 
 Object.assign((global[Symbol.for('lumiana.runtime')] ??= Object.create(null)), {
   Buffer,
   HybridWebSocket,
+  clearInterval: localClearInterval,
   clearImmediate: localClearImmediate,
+  clearTimeout: localClearTimeout,
   hybridFetch,
   moduleDirname,
   moduleFilename,
   moduleResolve,
   nativeAddon,
+  nativeExport,
   nodeGlobal,
   process: processRuntime,
+  setInterval: localSetInterval,
   setImmediate: localSetImmediate,
+  setTimeout: localSetTimeout,
 });

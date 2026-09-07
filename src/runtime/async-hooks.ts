@@ -1,4 +1,6 @@
 const NativeVariable = (globalThis as any).AsyncContext?.Variable;
+const activeStores = new Map<AsyncLocalStorage<any>, any>();
+let nextAsyncId = 1;
 
 export class AsyncLocalStorage<T = any> {
   private variable = NativeVariable ? new NativeVariable() : undefined;
@@ -6,6 +8,7 @@ export class AsyncLocalStorage<T = any> {
 
   disable(): void {
     this.current = undefined;
+    activeStores.delete(this);
   }
 
   getStore(): T | undefined {
@@ -15,16 +18,21 @@ export class AsyncLocalStorage<T = any> {
   enterWith(store: T): void {
     if (this.variable?.enterWith) this.variable.enterWith(store);
     else this.current = store;
+    activeStores.set(this, store);
   }
 
   run<R, A extends any[]>(store: T, callback: (...args: A) => R, ...args: A): R {
-    if (this.variable) return this.variable.run(store, () => callback(...args));
     const previous = this.current;
+    const wasActive = activeStores.has(this);
+    const previousActive = activeStores.get(this);
     this.current = store;
+    activeStores.set(this, store);
     try {
-      return callback(...args);
+      return this.variable ? this.variable.run(store, () => callback(...args)) : callback(...args);
     } finally {
       this.current = previous;
+      if (wasActive) activeStores.set(this, previousActive);
+      else activeStores.delete(this);
     }
   }
 
@@ -33,22 +41,32 @@ export class AsyncLocalStorage<T = any> {
   }
 
   static bind<F extends (...args: any[]) => any>(fn: F): F {
-    return fn;
+    return new AsyncResource(fn.name || 'bound-anonymous-fn').bind(fn);
   }
 
   static snapshot(): <R, A extends any[]>(fn: (...args: A) => R, ...args: A) => R {
-    return (fn, ...args) => fn(...args);
+    const resource = new AsyncResource('AsyncLocalStorage.snapshot');
+    return (fn, ...args) => resource.runInAsyncScope(fn, undefined, ...args);
   }
 }
 
 export class AsyncResource {
+  private readonly id = nextAsyncId++;
+  private readonly trigger = executionAsyncId();
+  private readonly stores = new Map(activeStores);
+
   constructor(
     readonly type: string,
     _options?: any,
   ) {}
 
   runInAsyncScope<R, A extends any[]>(fn: (...args: A) => R, receiver: any, ...args: A): R {
-    return Reflect.apply(fn, receiver, args);
+    const entries = [...this.stores];
+    const run = (index: number): R =>
+      index === entries.length
+        ? Reflect.apply(fn, receiver, args)
+        : entries[index][0].run(entries[index][1], () => run(index + 1));
+    return run(0);
   }
 
   emitDestroy(): this {
@@ -56,15 +74,29 @@ export class AsyncResource {
   }
 
   asyncId(): number {
-    return 0;
+    return this.id;
   }
 
   triggerAsyncId(): number {
-    return 0;
+    return this.trigger;
   }
 
-  static bind<F extends (...args: any[]) => any>(fn: F): F {
-    return fn;
+  bind<F extends (...args: any[]) => any>(fn: F): F {
+    if (typeof fn !== 'function') throw new TypeError('fn must be a function');
+    const resource = this;
+    const bound = function (this: any, ...args: any[]) {
+      return resource.runInAsyncScope(fn, this, ...args);
+    };
+    Object.defineProperties(bound, {
+      length: { value: fn.length },
+      asyncResource: { value: this },
+    });
+    return bound as F;
+  }
+
+  static bind<F extends (...args: any[]) => any>(fn: F, type?: string, receiver?: any): F {
+    const bound = new AsyncResource(type ?? (fn.name || 'bound-anonymous-fn')).bind(fn);
+    return (receiver === undefined ? bound : bound.bind(receiver)) as F;
   }
 }
 

@@ -1,4 +1,4 @@
-import stream from 'stream-browserify';
+import stream from './stream.js';
 
 export function pipeline(...streams: any[]): Promise<void> {
   return new Promise((resolve, reject) => {

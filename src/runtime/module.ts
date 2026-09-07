@@ -1,6 +1,6 @@
 import assert from 'assert';
 import asyncHooks from './async-hooks.js';
-import * as buffer from 'buffer';
+import * as buffer from './buffer.js';
 import crypto from './crypto.js';
 import constants from './constants.js';
 import dns, { promises as dnsPromises } from './dns.js';
@@ -9,7 +9,7 @@ import path from './path.js';
 import process from './process.js';
 import querystring from 'querystring-es3';
 import readline, { promises as readlinePromises } from './readline.js';
-import stream from 'stream-browserify';
+import stream from './stream.js';
 import stringDecoder from 'string_decoder';
 import url from './url.js';
 import util from './util.js';

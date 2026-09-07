@@ -4,6 +4,7 @@ import { fork, execFileSync } from 'node:child_process';
 import { once } from 'node:events';
 import { createRequire } from 'node:module';
 import { createServer } from 'node:net';
+import { createHmac as createNativeHmac } from 'node:crypto';
 import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
@@ -152,6 +153,7 @@ test('client contract through real HTTP, binary WebSocket and an isolated native
   const browserOS = await import('../dist/runtime/os.js');
   const browserChildProcess = await import('../dist/runtime/child-process.js');
   const browserDNS = await import('../dist/runtime/dns.js');
+  const browserCrypto = await import('../dist/runtime/crypto.js');
   const browserUtil = await import('../dist/runtime/util.js');
   const creds = { username: 'test', password: 'secret', url };
   const compile = async (source: string, origin = 'reader.js') => {
@@ -169,6 +171,11 @@ test('client contract through real HTTP, binary WebSocket and an isolated native
     const reader = await compile('export const read = (value) => value.child.value;');
     assert.equal(reader.read({ child: { value: 7 } }), 7);
     assert.throws(() => lumiana.status, /not connected/);
+    assert.throws(
+      () => browserCrypto.generateKeyPairSync('rsa', { modulusLength: 512 }),
+      /not connected/,
+    );
+    assert.throws(() => ({}) instanceof browserCrypto.KeyObject, /not connected/);
     await assert.rejects(browserFs.readFile('/not-connected'), /not connected/);
     await assert.rejects(
       connect.credentials({ ...creds, password: 'wrong' }),
@@ -188,6 +195,44 @@ test('client contract through real HTTP, binary WebSocket and an isolated native
       path.resolve('node_modules/package'),
     );
     assert.equal((await lumiana.status()).pid, pid);
+    const beforeCrypto = XMLHttpRequest.requests;
+    const keys = browserCrypto.generateKeyPairSync('rsa', {
+      modulusLength: 512,
+      publicKeyEncoding: { type: 'pkcs1', format: 'pem' },
+      privateKeyEncoding: { type: 'pkcs1', format: 'pem' },
+    });
+    assert.match(keys.publicKey, /BEGIN RSA PUBLIC KEY/);
+    assert.match(keys.privateKey, /BEGIN RSA PRIVATE KEY/);
+    assert.equal(
+      XMLHttpRequest.requests - beforeCrypto,
+      2,
+      'the native crypto module loads once and key generation is one operation',
+    );
+    browserCrypto.generateKeyPairSync('rsa', {
+      modulusLength: 512,
+      publicKeyEncoding: { type: 'pkcs1', format: 'pem' },
+      privateKeyEncoding: { type: 'pkcs1', format: 'pem' },
+    });
+    assert.equal(
+      XMLHttpRequest.requests - beforeCrypto,
+      3,
+      'subsequent native crypto calls reuse the local module reference',
+    );
+    const secretKey = browserCrypto.createSecretKey(Buffer.from('lumiana-secret'));
+    assert.equal(secretKey instanceof browserCrypto.KeyObject, true);
+    assert.equal(
+      browserCrypto.createHmac('sha256', secretKey).update('payload').digest('hex'),
+      createNativeHmac('sha256', 'lumiana-secret').update('payload').digest('hex'),
+    );
+    const keyObjects = browserCrypto.generateKeyPairSync('rsa', { modulusLength: 512 });
+    assert.equal(keyObjects.privateKey instanceof browserCrypto.KeyObject, true);
+    assert.equal(keyObjects.publicKey instanceof browserCrypto.KeyObject, true);
+    const signer = browserCrypto.createSign('RSA-SHA256');
+    signer.update('payload');
+    const signature = signer.sign(keyObjects.privateKey);
+    const verifier = browserCrypto.createVerify('RSA-SHA256');
+    verifier.update('payload');
+    assert.equal(verifier.verify(keyObjects.publicKey, signature), true);
     const beforeAddon = XMLHttpRequest.requests;
     const addon = nativeAddon('./test/fixtures/addon.cjs');
     assert.equal(XMLHttpRequest.requests - beforeAddon, 1, 'native addon loading is one call');
@@ -206,6 +251,9 @@ test('client contract through real HTTP, binary WebSocket and an isolated native
       1,
       'a native addon method is one operation without reflection calls',
     );
+    const mutable = Buffer.from([0x00, 0x55, 0xff]);
+    assert.equal(addon.mutate(mutable), mutable.length);
+    assert.deepEqual(mutable, Buffer.from([0xff, 0xaa, 0x00]));
     assert.equal(
       addon.call(20, (value: number) => value + 22),
       42,
@@ -215,6 +263,9 @@ test('client contract through real HTTP, binary WebSocket and an isolated native
     assert.equal(counter instanceof addon.Counter, true);
     assert.equal(counter.add(3), 5);
     assert.equal(counter.value, 5, 'mutable native resource data remains live');
+    assert.equal(counter.doubled, 10, 'native accessors receive their instance');
+    counter.doubled = 14;
+    assert.equal(counter.value, 7, 'native setters receive their instance');
     let thrown: unknown;
     try {
       addon.throwValue();
@@ -574,6 +625,15 @@ test('client contract through real HTTP, binary WebSocket and an isolated native
         .then((b) => new Uint8Array(b).join(',')),
       '0,128,255',
     );
+    const form = new FormData();
+    form.append('name', 'Lumiana');
+    form.append('file', new Blob([new Uint8Array([0, 128, 255])]), 'data.bin');
+    const multipart = new Uint8Array(
+      await (await hybridFetch(other + '/echo', { method: 'POST', body: form })).arrayBuffer(),
+    );
+    assert.match(Buffer.from(multipart).toString('latin1'), /name="name"\r\n\r\nLumiana/);
+    assert.match(Buffer.from(multipart).toString('latin1'), /filename="data.bin"/);
+    assert.ok(Buffer.from(multipart).includes(Buffer.from([0, 128, 255])));
     const abort = new AbortController();
     const aborted = hybridFetch(other + '/slow', { signal: abort.signal });
     setTimeout(() => abort.abort(), 10);

@@ -242,7 +242,7 @@ test('read-chain transforms preserve calls, writes, optional access and computed
 });
 test('CommonJS transforms preserve the CommonJS module contract', async () => {
   const transformed = await transformSource(
-    "'use strict';module.exports=(name)=>{setImmediate(()=>{});return [process.env,Buffer.from('x'),require(name)]};",
+    "'use strict';module.exports=(name)=>{setImmediate(()=>{});const timer=setInterval(()=>{},10);clearInterval(timer);return [process.env,Buffer.from('x'),require(name)]};",
     'runtime.cjs',
     {
       place: async () => ({}),
@@ -259,6 +259,8 @@ test('CommonJS transforms preserve the CommonJS module contract', async () => {
   assert.match(transformed.code, /Symbol\.for\("lumiana\.runtime"\)/);
   assert.match(transformed.code, /process:__lumiana/);
   assert.match(transformed.code, /setImmediate:__lumiana/);
+  assert.match(transformed.code, /setInterval:__lumiana/);
+  assert.match(transformed.code, /clearInterval:__lumiana/);
   assert.match(transformed.code, /nativeAddon:__lumiana/);
   assert.doesNotMatch(transformed.code, /require\(name\)/);
 });
@@ -414,6 +416,24 @@ test('createRequire records unavailable static dependencies at build time', asyn
     /makeRequire\(import\.meta\.url,"node_modules\/package\/index\.js",\["optional-native"\]\)/,
   );
 });
+test('computed calls through an ambient require alias use native references', async () => {
+  let retained = 0;
+  const transformed = await transformSource(
+    "const runtimeRequire=typeof webpackRequire==='function'?otherRequire:require;module.exports=dir=>runtimeRequire(resolveTarget(dir));",
+    'node_modules/native-loader/index.js',
+    {
+      origin: 'node_modules/native-loader/index.js',
+      place: async () => ({}),
+      retainPackage: () => retained++,
+    },
+  );
+  assert.equal(retained, 1);
+  assert.match(transformed!.code, /nativeAddon:__lumiana/);
+  assert.match(
+    transformed!.code,
+    /\(specifier=>__lumiana\d+\(specifier,"node_modules\/native-loader\/index\.js"\)\)\(resolveTarget\(dir\)\)/,
+  );
+});
 test('Node file URL conversion receives the native source module location', async () => {
   const sourceURL = 'file:///workspace/src/entry.ts';
   const transformed = await transformSource(
@@ -479,6 +499,12 @@ test('packages remain local and native-addon ownership is tracked independently'
     );
     const addons = new NativeAddons(temp);
     assert.deepEqual(await addons.dependencies(), {});
+    await addons.detect(path.join(packageRoot, 'loader.cjs'));
+    assert.deepEqual(
+      await addons.dependencies(),
+      { 'native-package': '2.0.0' },
+      'reachable packages containing native artifacts remain production dependencies',
+    );
     assert.equal(
       addons.addon(path.join(packageRoot, 'binding.node')),
       'native-package/binding.node',

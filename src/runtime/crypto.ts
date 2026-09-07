@@ -1,5 +1,5 @@
 import browserCrypto from 'crypto-browserify';
-import { Buffer } from 'buffer';
+import { Buffer } from './buffer.js';
 
 const webCrypto = globalThis.crypto;
 
@@ -69,10 +69,9 @@ export const {
   createDecipheriv,
   createDiffieHellman,
   createECDH,
+  createDiffieHellmanGroup,
   createHash,
-  createHmac,
   getCiphers,
-  getCurves,
   getDiffieHellman,
   getHashes,
   pbkdf2,
@@ -81,14 +80,77 @@ export const {
   privateEncrypt,
   publicDecrypt,
   publicEncrypt,
-  sign,
-  verify,
 } = browserCrypto as any;
+const localCreateHmac = (browserCrypto as any).createHmac;
+
+const nativeExport = (name: string): any => {
+  const load = (globalThis as any)[Symbol.for('lumiana.runtime')]?.nativeExport;
+  if (typeof load !== 'function')
+    throw new Error('Lumiana is not connected. Call await connect.credentials() first.');
+  return load('node:crypto', name);
+};
+
+const nativeFunction = (name: string) =>
+  function (this: any, ...args: any[]) {
+    return Reflect.apply(nativeExport(name), undefined, args);
+  };
+
+/** Local constructor identity for key resources retained by the engine. */
+export class KeyObject {
+  constructor(...args: any[]) {
+    return Reflect.construct(nativeExport('KeyObject'), args);
+  }
+
+  static [Symbol.hasInstance](value: any): boolean {
+    return value instanceof nativeExport('KeyObject');
+  }
+}
+
+// These APIs depend on OpenSSL key objects or native constant-time operations.
+// Their functions stay local references while each invocation executes in the engine.
+export const createPrivateKey = nativeFunction('createPrivateKey');
+export const createPublicKey = nativeFunction('createPublicKey');
+export const createSecretKey = nativeFunction('createSecretKey');
+export const createSign = nativeFunction('createSign');
+export const createVerify = nativeFunction('createVerify');
+export const diffieHellman = nativeFunction('diffieHellman');
+export const generateKey = nativeFunction('generateKey');
+export const generateKeyPair = nativeFunction('generateKeyPair');
+export const generateKeyPairSync = nativeFunction('generateKeyPairSync');
+export const generateKeySync = nativeFunction('generateKeySync');
+export const getCurves = nativeFunction('getCurves');
+export const sign = nativeFunction('sign');
+export const timingSafeEqual = nativeFunction('timingSafeEqual');
+export const verify = nativeFunction('verify');
+
+export function createHmac(algorithm: string, key: any, options?: any): any {
+  if (typeof key === 'string' || key instanceof ArrayBuffer || ArrayBuffer.isView(key))
+    return Reflect.apply(localCreateHmac, browserCrypto, [algorithm, key, options]);
+  if (key instanceof KeyObject)
+    return Reflect.apply(nativeExport('createHmac'), undefined, [algorithm, key, options]);
+  return Reflect.apply(localCreateHmac, browserCrypto, [algorithm, key, options]);
+}
 
 export default {
   ...(browserCrypto as any),
+  createHmac,
+  createPrivateKey,
+  createPublicKey,
+  createSecretKey,
+  createSign,
+  createVerify,
+  diffieHellman,
+  generateKey,
+  generateKeyPair,
+  generateKeyPairSync,
+  generateKeySync,
+  getCurves,
+  KeyObject,
   randomBytes,
   randomFill,
   randomFillSync,
   randomUUID,
+  sign,
+  timingSafeEqual,
+  verify,
 };

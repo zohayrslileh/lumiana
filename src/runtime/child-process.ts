@@ -1,5 +1,5 @@
 import EventEmitter from 'events';
-import stream from 'stream-browserify';
+import stream from './stream.js';
 import { Buffer } from 'buffer';
 import { kernelCall, kernelCallSync, kernelSubscribe } from './bridge.js';
 import { promisify } from './util.js';

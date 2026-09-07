@@ -152,6 +152,7 @@ export const bare = (id: string) =>
   !id.startsWith('.') && !id.startsWith('/') && !id.startsWith('\0');
 export class NativeAddons {
   private addons = new Map<string, string>();
+  private inspections = new Map<string, Promise<void>>();
   constructor(readonly root: string) {}
   private owner(file: string): { name: string; root: string } {
     const normalized = file.split(path.sep).join('/');
@@ -178,6 +179,40 @@ export class NativeAddons {
       const owner = this.owner(importer);
       this.addons.set(owner.name, path.join(owner.root, 'package.json'));
     } catch {}
+  }
+  /** Retain a reachable package when its installed files include a native addon. */
+  async detect(file: string): Promise<void> {
+    let owner: { name: string; root: string };
+    try {
+      owner = this.owner(file);
+    } catch {
+      return;
+    }
+    let inspection = this.inspections.get(owner.root);
+    if (!inspection) {
+      inspection = (async () => {
+        const pending = [owner.root];
+        while (pending.length) {
+          const directory = pending.pop()!;
+          let entries;
+          try {
+            entries = await fs.readdir(directory, { withFileTypes: true });
+          } catch {
+            continue;
+          }
+          for (const entry of entries) {
+            if (entry.isFile() && entry.name.endsWith('.node')) {
+              this.addons.set(owner.name, path.join(owner.root, 'package.json'));
+              return;
+            }
+            if (entry.isDirectory() && entry.name !== 'node_modules')
+              pending.push(path.join(directory, entry.name));
+          }
+        }
+      })();
+      this.inspections.set(owner.root, inspection);
+    }
+    await inspection;
   }
   /** Retain a package whose code is intentionally loaded by the engine at runtime. */
   async retainRequest(request: string, importer: string): Promise<void> {
@@ -399,6 +434,10 @@ export async function transformSource(source: string, id: string, options: Trans
     socketName = name(),
     bufferName = name(),
     processName = name(),
+    timeoutName = name(),
+    clearTimeoutName = name(),
+    intervalName = name(),
+    clearIntervalName = name(),
     immediateName = name(),
     clearImmediateName = name(),
     filenameName = name(),
@@ -418,6 +457,27 @@ export async function transformSource(source: string, id: string, options: Trans
     node.object?.type === 'MetaProperty' &&
     node.object.meta?.name === 'import' &&
     node.object.property?.name === 'meta';
+  const ambientRequire = (node: any, scope: any, seen = new Set<any>()): boolean => {
+    node = unwrapExpression(node);
+    if (!node) return false;
+    if (node.type === 'Identifier') {
+      const binding = scope.getBinding(node.name);
+      if (!binding) return node.name === 'require';
+      if (seen.has(binding)) return false;
+      seen.add(binding);
+      return ambientRequire(binding.path.node.init, binding.path.scope, seen);
+    }
+    if (node.type === 'ConditionalExpression')
+      return (
+        ambientRequire(node.consequent, scope, seen) || ambientRequire(node.alternate, scope, seen)
+      );
+    if (node.type === 'LogicalExpression')
+      return ambientRequire(node.left, scope, seen) || ambientRequire(node.right, scope, seen);
+    if (node.type === 'SequenceExpression')
+      return node.expressions.some((item: any) => ambientRequire(item, scope, seen));
+    if (node.type === 'AssignmentExpression') return ambientRequire(node.right, scope, seen);
+    return false;
+  };
   const viteEnvironment = (p: any) => {
     const environment = p.parentPath?.node;
     const variable = p.parentPath?.parentPath?.node;
@@ -507,8 +567,16 @@ export async function transformSource(source: string, id: string, options: Trans
     }
   }
   let commonjs = false,
-    usesProcess = false,
-    usesTimers = false;
+    usesProcess = false;
+  const usedTimers = new Set<string>();
+  const timerNames: Record<string, string> = {
+    setTimeout: timeoutName,
+    clearTimeout: clearTimeoutName,
+    setInterval: intervalName,
+    clearInterval: clearIntervalName,
+    setImmediate: immediateName,
+    clearImmediate: clearImmediateName,
+  };
   const boundaryTasks: Array<{
     path: any;
     kind: 'run' | 'worker' | 'sharedWorker';
@@ -579,7 +647,8 @@ export async function transformSource(source: string, id: string, options: Trans
       if (p.node.callee.name === 'require' && !binding) {
         if (p.node.arguments[0]?.type === 'StringLiteral') moduleNodes.push(p);
         else dynamicRequires.push(p);
-      }
+      } else if (binding && ambientRequire(binding.path.node.init, binding.path.scope))
+        dynamicRequires.push(p);
     },
     ImportExpression(p: any) {
       if (p.node.source.type === 'StringLiteral') moduleNodes.push(p);
@@ -600,7 +669,7 @@ export async function transformSource(source: string, id: string, options: Trans
         globals.push(p);
       else if (
         options.nodeGlobals !== false &&
-        ['process', 'setImmediate', 'clearImmediate'].includes(p.node.name) &&
+        ['process', ...Object.keys(timerNames)].includes(p.node.name) &&
         !(p.node.name === 'process' && viteEnvironment(p))
       )
         globals.push(p);
@@ -811,12 +880,9 @@ export async function transformSource(source: string, id: string, options: Trans
     } else if (n.name === 'global') {
       used.add('nodeGlobal');
       replacement = globalName;
-    } else if (n.name === 'setImmediate') {
-      usesTimers = true;
-      replacement = immediateName;
-    } else if (n.name === 'clearImmediate') {
-      usesTimers = true;
-      replacement = clearImmediateName;
+    } else if (n.name in timerNames) {
+      usedTimers.add(n.name);
+      replacement = timerNames[n.name]!;
     } else if (n.name === '__filename') {
       used.add('moduleFilename');
       replacement = `${filenameName}(${JSON.stringify(options.origin ?? id)})`;
@@ -830,7 +896,13 @@ export async function transformSource(source: string, id: string, options: Trans
       replacement = `${n.name}: ${replacement}`;
     edits.overwrite(n.start, n.end, replacement);
   }
-  if (!used.size && !usesProcess && !usesTimers && !moduleLocationChanged && !moduleSourceChanged)
+  if (
+    !used.size &&
+    !usesProcess &&
+    !usedTimers.size &&
+    !moduleLocationChanged &&
+    !moduleSourceChanged
+  )
     return null;
   const names: Record<string, string> = {
     hybridFetch: fetchName,
@@ -849,12 +921,14 @@ export async function transformSource(source: string, id: string, options: Trans
         ? `const {process:${processName}}=${commonRuntime};\n`
         : `import ${processName} from ${JSON.stringify(options.process ?? 'node:process')};\n`,
     );
-  if (usesTimers)
+  if (usedTimers.size) {
+    const bindings = [...usedTimers].map((key) => `${key}:${timerNames[key]}`).join(',');
     imports.push(
       commonjs
-        ? `const {setImmediate:${immediateName},clearImmediate:${clearImmediateName}}=${commonRuntime};\n`
-        : `import {setImmediate as ${immediateName},clearImmediate as ${clearImmediateName}} from ${JSON.stringify(options.timers ?? 'node:timers')};\n`,
+        ? `const {${bindings}}=${commonRuntime};\n`
+        : `import {${[...usedTimers].map((key) => `${key} as ${timerNames[key]}`).join(',')}} from ${JSON.stringify(options.timers ?? 'node:timers')};\n`,
     );
+  }
   if (used.size)
     imports.push(
       commonjs

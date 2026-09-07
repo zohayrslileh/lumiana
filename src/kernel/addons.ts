@@ -55,6 +55,12 @@ export class AddonKernel {
     return this.values.get(handle);
   }
 
+  private load(specifier: string, sourceOrigin?: string): any {
+    return sourceOrigin
+      ? createRequire(path.join(this.root, sourceOrigin))(specifier)
+      : this.require(specifier);
+  }
+
   private describe(value: any, expanding = new Set<number>()): Descriptor {
     try {
       encodeValue(value);
@@ -170,6 +176,16 @@ export class AddonKernel {
     return Object.fromEntries(Object.entries(value).map(([key, item]) => [key, this.unpack(item)]));
   }
 
+  private invocation(value: any, args: any[]) {
+    return {
+      kind: 'invocation',
+      result: this.describe(value),
+      arguments: args.map((value) =>
+        value instanceof ArrayBuffer || ArrayBuffer.isView(value) ? value : undefined,
+      ),
+    };
+  }
+
   async execute(operation: string, args: any[]): Promise<any> {
     if (operation !== 'addon.await') return this.executeSync(operation, args);
     const promise = this.promises.get(args[0]);
@@ -181,24 +197,34 @@ export class AddonKernel {
   executeSync(operation: string, args: any[]): any {
     switch (operation) {
       case 'addon.load':
-        return this.describe(
-          args[1] ? createRequire(path.join(this.root, args[1]))(args[0]) : this.require(args[0]),
-        );
+        return this.describe(this.load(args[0], args[1]));
+      case 'addon.export': {
+        const module = this.load(args[0], args[2]);
+        return this.describe(Reflect.get(module, args[1], module));
+      }
       case 'addon.get':
         return this.describe(Reflect.get(this.value(args[0]), args[1], this.value(args[0])));
       case 'addon.set':
         Reflect.set(this.value(args[0]), args[1], this.unpack(args[2]), this.value(args[0]));
         return undefined;
-      case 'addon.apply':
-        return this.describe(
+      case 'addon.apply': {
+        const invocationArgs = this.unpack(args[2]);
+        return this.invocation(
           Reflect.apply(
             this.value(args[0]),
             args[1] === undefined ? undefined : this.value(args[1]),
-            this.unpack(args[2]),
+            invocationArgs,
           ),
+          invocationArgs,
         );
-      case 'addon.construct':
-        return this.describe(Reflect.construct(this.value(args[0]), this.unpack(args[1])));
+      }
+      case 'addon.construct': {
+        const invocationArgs = this.unpack(args[1]);
+        return this.invocation(
+          Reflect.construct(this.value(args[0]), invocationArgs),
+          invocationArgs,
+        );
+      }
       default:
         throw new TypeError(`Unknown native-addon operation ${operation}`);
     }

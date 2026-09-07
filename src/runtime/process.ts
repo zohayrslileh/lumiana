@@ -30,6 +30,16 @@ const state: ProcessState = (scope[key] ??= {
 const { runtime, env } = state;
 const listeners = (state.listeners ??= new Set());
 
+const monotonicNanoseconds = () => BigInt(Math.trunc(performance.now() * 1_000_000));
+export const hrtime = Object.assign(
+  (previous?: [number, number]): [number, number] => {
+    let value = monotonicNanoseconds();
+    if (previous) value -= BigInt(previous[0]) * 1_000_000_000n + BigInt(previous[1]);
+    return [Number(value / 1_000_000_000n), Number(value % 1_000_000_000n)];
+  },
+  { bigint: monotonicNanoseconds },
+);
+
 let nativeProcess: any;
 const nativeReference = (key: 'stdin' | 'stdout' | 'stderr') => {
   const bound = new WeakMap<object, Map<PropertyKey, Function>>();
@@ -76,7 +86,7 @@ export const stdin = nativeReference('stdin');
 export const stdout = nativeReference('stdout');
 export const stderr = nativeReference('stderr');
 
-Object.assign(runtime, { stdin, stdout, stderr });
+Object.assign(runtime, { hrtime, stdin, stdout, stderr });
 
 /** Keep local platform-dependent bindings in sync with connection metadata. */
 export function observeProcess(listener: () => void): void {

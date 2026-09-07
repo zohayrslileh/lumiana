@@ -4,15 +4,26 @@ import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { Buffer } from 'buffer';
+import { Buffer as runtimeBuffer } from '../src/runtime/buffer.js';
 import { once } from 'node:events';
 import { createContext, runInContext } from 'node:vm';
 import { installGlobals } from '../src/runtime/globals.js';
+import { AsyncLocalStorage, AsyncResource } from '../src/runtime/async-hooks.js';
+import streamRuntime from '../src/runtime/stream.js';
 import processRuntime, {
+  hrtime,
   stderr as processStderr,
   stdin as processStdin,
   stdout as processStdout,
 } from '../src/runtime/process.js';
-import { setImmediate, clearImmediate } from '../src/runtime/timers.js';
+import {
+  clearImmediate,
+  clearInterval,
+  clearTimeout,
+  setImmediate,
+  setInterval,
+  setTimeout,
+} from '../src/runtime/timers.js';
 import { FileKernel } from '../src/kernel/files.js';
 import { NetworkKernel } from '../src/kernel/network.js';
 import { ModuleKernel } from '../src/kernel/modules.js';
@@ -42,10 +53,78 @@ test('Node global capabilities are available through the realm and its aliases',
   assert.equal(processRuntime.stdin, processStdin);
   assert.equal(processRuntime.stdout, processStdout);
   assert.equal(processRuntime.stderr, processStderr);
+  const start = hrtime();
+  const elapsed = hrtime(start);
+  assert.equal(elapsed[0] >= 0, true);
+  assert.equal(elapsed[1] >= 0 && elapsed[1] < 1_000_000_000, true);
+  assert.equal(typeof hrtime.bigint(), 'bigint');
   assert.equal(runInContext('global.process.stdout', context), processStdout);
   installGlobals(realm, { process: {}, native: false });
   assert.equal(realm.process, processRuntime);
   assert.equal(realm.native, true, 'existing realm capabilities retain their identity');
+});
+
+test('AsyncResource binds callbacks to its local async context', () => {
+  const storage = new AsyncLocalStorage<string>();
+  let resource!: AsyncResource;
+  const bound = storage.run('request', () => {
+    resource = new AsyncResource('request-handler');
+    return resource.bind(function (this: { name: string }, suffix: string) {
+      return `${storage.getStore()}:${this.name}:${suffix}`;
+    });
+  });
+
+  assert.equal(bound.call({ name: 'parser' }, 'done'), 'request:parser:done');
+  assert.equal((bound as any).asyncResource, resource);
+  assert.equal(bound.length, 1);
+  assert.notEqual(resource.asyncId(), resource.triggerAsyncId());
+});
+
+test('local streams expose Node lifecycle state', async () => {
+  const readable = new streamRuntime.Readable({ read() {} });
+  assert.equal(readable.readableEnded, false);
+  readable.resume();
+  readable.push('value');
+  readable.push(null);
+  await once(readable, 'end');
+  assert.equal(readable.readableEnded, true);
+  assert.equal(readable.readable, false);
+
+  const writable = new streamRuntime.Writable({
+    write(_chunk, _encoding, done) {
+      done();
+    },
+  });
+  writable.end('value');
+  await once(writable, 'finish');
+  assert.equal(writable.writableEnded, true);
+  assert.equal(writable.writableFinished, true);
+});
+
+test('local timers expose Node timer handles while using the browser scheduler', async () => {
+  let timeoutCalls = 0;
+  const timeout = setTimeout((increment) => (timeoutCalls += increment), 5, 2);
+  assert.equal(timeout.hasRef(), true);
+  assert.equal(timeout.unref(), timeout);
+  assert.equal(timeout.hasRef(), false);
+  assert.equal(timeout.ref(), timeout);
+  timeout.refresh();
+  await new Promise((resolve) => globalThis.setTimeout(resolve, 20));
+  assert.equal(timeoutCalls, 2);
+
+  let intervalCalls = 0;
+  const interval = setInterval(() => intervalCalls++, 5);
+  interval.refresh();
+  await new Promise((resolve) => globalThis.setTimeout(resolve, 18));
+  clearInterval(interval);
+  assert.equal(intervalCalls > 0, true);
+
+  const cancelled = setTimeout(() => assert.fail('cancelled timer ran'), 1);
+  clearTimeout(cancelled);
+  const immediate = setImmediate(() => assert.fail('cancelled immediate ran'));
+  assert.equal('refresh' in immediate, false);
+  clearImmediate(immediate);
+  await new Promise((resolve) => globalThis.setTimeout(resolve, 10));
 });
 
 test('createRequire keeps portable CommonJS constructors local', () => {
@@ -84,6 +163,14 @@ test('crypto and compression execute locally with binary Node-compatible values'
     'eddec645f3362a73ebb250129b196d57253d78f670655ab9a9472eaf814c1893',
   );
   assert.deepEqual(zlib.gunzipSync(zlib.gzipSync(bytes)), bytes);
+});
+
+test('Buffer exposes Node encoding slices and writes', () => {
+  const value = runtimeBuffer.from('Lumiana');
+  assert.equal((value as any).base64Slice(0, value.length), 'THVtaWFuYQ==');
+  const decoded = runtimeBuffer.alloc(value.length);
+  assert.equal((decoded as any).base64Write('THVtaWFuYQ==', 0, decoded.length), value.length);
+  assert.deepEqual(decoded, value);
 });
 
 test('promisify honors the process-wide Node custom implementation contract', async () => {
@@ -247,8 +334,12 @@ test('directory entries returned by the kernel have local Node-compatible behavi
 
 test('socket libraries retain local servers, sockets, streams and callbacks', async () => {
   const listeners = new Map<number, Set<(event: string, args: any[]) => void>>();
+  const calls: Array<{ operation: string; args: any[] }> = [];
   const network = createNetwork(
-    (operation, ...args) => kernel.execute(operation, args),
+    (operation, ...args) => {
+      calls.push({ operation, args });
+      return kernel.execute(operation, args);
+    },
     (handle, listener) => {
       const set = listeners.get(handle) ?? new Set();
       set.add(listener);
@@ -259,14 +350,23 @@ test('socket libraries retain local servers, sockets, streams and callbacks', as
   const kernel = new NetworkKernel((handle, event, ...args) => {
     for (const listener of listeners.get(handle) ?? []) listener(event, args);
   });
-  const server = network.createServer((socket: any) => {
-    assert.equal(socket.constructor, network.Socket);
-    socket.on('data', (data: Buffer) => socket.write(data));
-  });
+  const server = network.createServer(
+    { noDelay: true, applicationCallback: () => {} },
+    (socket: any) => {
+      assert.equal(socket.constructor, network.Socket);
+      socket.on('data', (data: Buffer) => socket.write(data));
+    },
+  );
 
   try {
-    server.listen(0, '127.0.0.1');
+    server.listen({ port: 0, host: '127.0.0.1', cb: () => {} });
     await once(server, 'listening');
+    assert.deepEqual(calls.find(({ operation }) => operation === 'net.server')?.args, [
+      { noDelay: true },
+    ]);
+    assert.deepEqual(calls.find(({ operation }) => operation === 'net.listen')?.args.slice(1), [
+      { port: 0, host: '127.0.0.1' },
+    ]);
     const address = server.address();
     assert.equal(typeof address.port, 'number');
     const socket = network.createConnection(address.port, '127.0.0.1');

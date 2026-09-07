@@ -1,4 +1,4 @@
-import stream from 'stream-browserify';
+import stream from './stream.js';
 import { EventEmitter } from 'events';
 import { Buffer } from 'buffer';
 import { createHttp } from './http-core.js';
