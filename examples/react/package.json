@@ -15,6 +15,7 @@
     "better-sqlite3": "^13.0.3",
     "hono": "^4.13.7",
     "lumiana": "link:lumiana",
+    "puppeteer": "^25.10.0",
     "react": "^19.2.8",
     "react-dom": "^19.2.8",
     "socket.io": "^4.8.3",

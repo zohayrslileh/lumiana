@@ -298,6 +298,9 @@ export class FileKernel {
       case 'fs.link':
         await fs.link(args[0], args[1]);
         return undefined;
+      case 'fs.lutimes':
+        await fs.lutimes(args[0], args[1], args[2]);
+        return undefined;
       case 'fs.lstat':
         return statRecord(await fs.lstat(args[0], args[1]));
       case 'fs.mkdir':

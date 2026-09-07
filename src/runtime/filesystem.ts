@@ -152,6 +152,7 @@ export function createFileSystem(call: KernelCall) {
     copyFile: direct('copyFile'),
     cp: direct('cp'),
     link: direct('link'),
+    lutimes: direct('lutimes'),
     mkdir: direct('mkdir'),
     mkdtemp: direct('mkdtemp'),
     readlink: direct('readlink'),

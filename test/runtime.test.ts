@@ -7,7 +7,11 @@ import { Buffer } from 'buffer';
 import { once } from 'node:events';
 import { createContext, runInContext } from 'node:vm';
 import { installGlobals } from '../src/runtime/globals.js';
-import processRuntime from '../src/runtime/process.js';
+import processRuntime, {
+  stderr as processStderr,
+  stdin as processStdin,
+  stdout as processStdout,
+} from '../src/runtime/process.js';
 import { setImmediate, clearImmediate } from '../src/runtime/timers.js';
 import { FileKernel } from '../src/kernel/files.js';
 import { NetworkKernel } from '../src/kernel/network.js';
@@ -35,8 +39,10 @@ test('Node global capabilities are available through the realm and its aliases',
   assert.equal(runInContext('global.Buffer.from("hello").toString()', context), 'hello');
   assert.equal(runInContext('global.setImmediate', context), setImmediate);
   assert.equal(runInContext('global.clearImmediate', context), clearImmediate);
-  // Accessing an absent standard stream is a valid comparison, not a missing process object.
-  assert.equal(runInContext('global.process.stdout === undefined', context), true);
+  assert.equal(processRuntime.stdin, processStdin);
+  assert.equal(processRuntime.stdout, processStdout);
+  assert.equal(processRuntime.stderr, processStderr);
+  assert.equal(runInContext('global.process.stdout', context), processStdout);
   installGlobals(realm, { process: {}, native: false });
   assert.equal(realm.process, processRuntime);
   assert.equal(realm.native, true, 'existing realm capabilities retain their identity');

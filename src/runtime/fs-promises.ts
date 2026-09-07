@@ -13,6 +13,7 @@ export const {
   copyFile,
   cp,
   link,
+  lutimes,
   lstat,
   mkdir,
   mkdtemp,

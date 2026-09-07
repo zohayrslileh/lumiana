@@ -402,7 +402,7 @@ test('module placement receives the exports required by each static use', async 
 });
 test('createRequire records unavailable static dependencies at build time', async () => {
   const transformed = await transformSource(
-    "import {createRequire as makeRequire} from 'node:module';const require=makeRequire(import.meta.url);try{require(`optional-native`)}catch{};process.on('exit',()=>{});",
+    "import {createRequire as makeRequire} from 'node:module';const require=makeRequire(import.meta.url);try{require(`optional-native`)}catch{};export default {require};process.on('exit',()=>{});",
     'package.js',
     {
       origin: 'node_modules/package/index.js',

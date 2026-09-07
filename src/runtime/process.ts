@@ -30,6 +30,54 @@ const state: ProcessState = (scope[key] ??= {
 const { runtime, env } = state;
 const listeners = (state.listeners ??= new Set());
 
+let nativeProcess: any;
+const nativeReference = (key: 'stdin' | 'stdout' | 'stderr') => {
+  const bound = new WeakMap<object, Map<PropertyKey, Function>>();
+  const resolve = () => {
+    if (!nativeProcess) {
+      const load = (globalThis as any)[Symbol.for('lumiana.runtime')]?.nativeAddon;
+      if (typeof load !== 'function') throw new Error('Lumiana is not connected');
+      nativeProcess = load('node:process');
+    }
+    return nativeProcess[key];
+  };
+  return new Proxy(Object.create(null), {
+    get(_target, property) {
+      const value = resolve();
+      const member = Reflect.get(value, property, value);
+      if (typeof member !== 'function') return member;
+      let methods = bound.get(value);
+      if (!methods) bound.set(value, (methods = new Map()));
+      let method = methods.get(property);
+      if (!method) methods.set(property, (method = member.bind(value)));
+      return method;
+    },
+    set(_target, property, value) {
+      const reference = resolve();
+      return Reflect.set(reference, property, value, reference);
+    },
+    has(_target, property) {
+      return property in resolve();
+    },
+    ownKeys() {
+      return Reflect.ownKeys(resolve());
+    },
+    getOwnPropertyDescriptor(_target, property) {
+      const descriptor = Reflect.getOwnPropertyDescriptor(resolve(), property);
+      return descriptor && { ...descriptor, configurable: true };
+    },
+    getPrototypeOf() {
+      return Reflect.getPrototypeOf(resolve());
+    },
+  });
+};
+
+export const stdin = nativeReference('stdin');
+export const stdout = nativeReference('stdout');
+export const stderr = nativeReference('stderr');
+
+Object.assign(runtime, { stdin, stdout, stderr });
+
 /** Keep local platform-dependent bindings in sync with connection metadata. */
 export function observeProcess(listener: () => void): void {
   listeners.add(listener);
@@ -47,6 +95,7 @@ if (runtime.env !== env) {
 
 /** Replace connection-owned process state without changing object identity. */
 export function initializeProcess(snapshot: ProcessSnapshot): void {
+  nativeProcess = undefined;
   for (const key of Object.keys(env)) delete env[key];
   Object.assign(env, snapshot.env);
   state.directory = snapshot.cwd;

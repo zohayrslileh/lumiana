@@ -475,18 +475,15 @@ export async function transformSource(source: string, id: string, options: Trans
       const unavailable = new Set<string>();
       for (const reference of binding?.referencePaths ?? []) {
         const call = reference.parentPath;
-        const argument = call?.node.arguments[0];
+        if (!call?.isCallExpression() || call.node.callee !== reference.node) continue;
+        const argument = call.node.arguments[0];
         const specifier =
           argument?.type === 'StringLiteral'
             ? argument.value
             : argument?.type === 'TemplateLiteral' && argument.expressions.length === 0
               ? argument.quasis[0].value.cooked
               : undefined;
-        if (
-          call?.isCallExpression() &&
-          call.node.callee === reference.node &&
-          specifier !== undefined
-        ) {
+        if (specifier !== undefined) {
           if (options.locateAddon && specifier.endsWith('.node')) {
             const located = await options.locateAddon(specifier);
             if (located) {
